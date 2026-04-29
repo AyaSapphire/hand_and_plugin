@@ -429,12 +429,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
 
         Location loc = player.getLocation().clone();
-        float visualYaw = state.rotationLocked ? state.lockedYaw : loc.getYaw();
+        float visualYaw = state.rotationLocked ? state.lockedYaw : snapYaw(loc.getYaw());
         loc.setPitch(0f);
         loc.setYaw(0f);
         if (!state.rotationLocked) state.lockedYaw = visualYaw;
         state.display.teleport(loc);
-        applyDisguiseTransform(state.display, visualYaw);
+        if (needsTransformUpdate(state, visualYaw)) {
+            applyDisguiseTransform(state.display, visualYaw);
+            state.visualYaw = visualYaw;
+        }
 
         if (state.disguised) {
             player.addPotionEffect(new PotionEffect(PotionEffectType.INVISIBILITY, 40, 0, false, false, false));
@@ -540,7 +543,25 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             display.setTeleportDuration(1);
             display.setRotation(0f, 0f);
             applyDisguiseTransform(display, state.lockedYaw);
+            state.visualYaw = state.lockedYaw;
         });
+    }
+
+    private float snapYaw(float yaw) {
+        double snapDegrees = settings.disguiseRotationSnapDegrees();
+        if (snapDegrees <= 0) return normalizeYaw(yaw);
+        return normalizeYaw((float) (Math.round(yaw / snapDegrees) * snapDegrees));
+    }
+
+    private float normalizeYaw(float yaw) {
+        float normalized = yaw % 360f;
+        if (normalized <= -180f) normalized += 360f;
+        if (normalized > 180f) normalized -= 360f;
+        return normalized;
+    }
+
+    private boolean needsTransformUpdate(GamePlayer state, float yaw) {
+        return state.display == null || Math.abs(normalizeYaw(yaw - state.visualYaw)) > 0.01f;
     }
 
     private void applyDisguiseTransform(BlockDisplay display, float yaw) {
@@ -668,7 +689,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void toggleRotationLock(Player player, GamePlayer state) {
         if (state.role != Role.HIDER) return;
         state.rotationLocked = !state.rotationLocked;
-        state.lockedYaw = player.getLocation().getYaw();
+        state.lockedYaw = normalizeYaw(player.getLocation().getYaw());
+        if (state.display != null) {
+            applyDisguiseTransform(state.display, state.lockedYaw);
+            state.visualYaw = state.lockedYaw;
+        }
         player.sendMessage(state.rotationLocked ? "已锁定伪装旋转。" : "已解除旋转锁定。");
         player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1.3f);
     }
@@ -966,6 +991,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 nonNegativeInt("player.mpRegenPerTick"),
                 positiveInt("player.damagePerHit"),
                 positiveInt("abilities.disguise.range"),
+                clampedDouble("abilities.disguise.rotationSnapDegrees", 0.0, 360.0),
                 positiveInt("abilities.decoy.hp"),
                 nonNegativeInt("abilities.decoy.mp"),
                 positiveInt("abilities.decoy.lifetimeTicks"),
@@ -1011,6 +1037,14 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return Math.max(0, getConfig().getInt(path));
     }
 
+    private int clampedInt(String path, int min, int max) {
+        return Math.max(min, Math.min(max, getConfig().getInt(path)));
+    }
+
+    private double clampedDouble(String path, double min, double max) {
+        return Math.max(min, Math.min(max, getConfig().getDouble(path)));
+    }
+
     private long nonNegativeLong(String path) {
         return Math.max(0L, getConfig().getLong(path));
     }
@@ -1033,6 +1067,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             int mpRegenPerTick,
             int damagePerHit,
             int disguiseRange,
+            double disguiseRotationSnapDegrees,
             int decoyHp,
             int decoyMp,
             int decoyLifetimeTicks,
@@ -1076,6 +1111,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private boolean disguised;
         private boolean rotationLocked;
         private float lockedYaw;
+        private float visualYaw;
         private BlockData disguiseData;
         private BlockDisplay display;
 

@@ -17,6 +17,7 @@ player:
 abilities:
   disguise:
     range: 15
+    rotationSnapDegrees: 22.5
   decoy:
     hp: 100
     mp: 1200
