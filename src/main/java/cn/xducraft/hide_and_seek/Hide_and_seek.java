@@ -21,6 +21,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.BlockDisplay;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -58,38 +59,27 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 
 public final class Hide_and_seek extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
-    private static final int MAX_HP = 2000;
-    private static final int MAX_MP = 2000;
-    private static final int DAMAGE_PER_HIT = 400;
-    private static final int GAME_TICKS = 12000;
-    private static final int SEEKER_RELEASE_AT = 11400;
-    private static final int SEEKER_COUNT = 3;
-    private static final int DECOY_HP = 100;
-    private static final int DECOY_MP = 1200;
-    private static final int DECOY_LIFETIME = 600;
-    private static final int HIDER_FLY_MP = 1600;
-    private static final int SEEKER_FLY_MP = 300;
-    private static final int ATTACK_MP = 60;
-    private static final int SCAN_MP = 1300;
-    private static final double SCAN_RADIUS = 10.0;
-
     private final Map<UUID, GamePlayer> players = new HashMap<>();
     private final List<Decoy> decoys = new ArrayList<>();
     private NamespacedKey abilityKey;
     private NamespacedKey noDropKey;
     private NamespacedKey attackKey;
+    private GameSettings settings;
     private BukkitTask gameTask;
     private BossBar bossBar;
     private GamePhase phase = GamePhase.IDLE;
@@ -102,6 +92,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         noDropKey = new NamespacedKey(this, "no_drop");
         attackKey = new NamespacedKey(this, "attack_bullet");
         saveDefaultConfig();
+        ensureConfigDefaults();
+        settings = loadSettings();
         loadSpawn();
         Bukkit.getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(getCommand("has"), "Command has is missing from plugin.yml").setExecutor(this);
@@ -116,7 +108,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage("/has <start|stop|setspawn|status>");
+            sendHelp(sender);
             return true;
         }
         if (!sender.hasPermission("hide_and_seek.admin")) {
@@ -139,19 +131,207 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 saveSpawn(arenaSpawn);
                 sender.sendMessage("已设置躲猫猫出生点。");
             }
-            case "status" -> sender.sendMessage("状态: " + phase + ", 玩家: " + players.size() + ", 剩余 tick: " + remainingTicks);
-            default -> sender.sendMessage("/has <start|stop|setspawn|status>");
+            case "status" -> sendStatus(sender);
+            case "reload" -> reloadGameConfig(sender);
+            case "settings", "config" -> handleSettingsCommand(sender, args);
+            case "help" -> sendHelp(sender);
+            default -> sendHelp(sender);
         }
         return true;
     }
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (args.length > 1 && (args[0].equalsIgnoreCase("settings") || args[0].equalsIgnoreCase("config"))) {
+            return tabCompleteSettings(args);
+        }
         if (args.length != 1) return List.of();
         String prefix = args[0].toLowerCase(Locale.ROOT);
-        return List.of("start", "stop", "setspawn", "status").stream()
+        return List.of("help", "start", "stop", "setspawn", "status", "reload", "settings").stream()
                 .filter(option -> option.startsWith(prefix))
                 .toList();
+    }
+
+    private void sendHelp(CommandSender sender) {
+        sender.sendMessage("/has start - 开始一局躲猫猫");
+        sender.sendMessage("/has stop - 停止当前游戏并清理实体");
+        sender.sendMessage("/has setspawn - 使用你当前位置作为竞技场出生点");
+        sender.sendMessage("/has status - 查看当前游戏和关键设置");
+        sender.sendMessage("/has reload - 重载 config.yml");
+        sender.sendMessage("/has settings list|get|set|reset - 查看和调整玩法设置");
+    }
+
+    private void sendStatus(CommandSender sender) {
+        sender.sendMessage("状态: " + phase + ", 玩家: " + players.size() + ", 剩余 tick: " + remainingTicks);
+        sender.sendMessage("设置: 时长 " + settings.durationTicks() + " ticks, seeker " + settings.seekerCount()
+                + ", HP/MP " + settings.maxHp() + "/" + settings.maxMp()
+                + ", 攻击伤害 " + settings.damagePerHit());
+    }
+
+    private void reloadGameConfig(CommandSender sender) {
+        reloadConfig();
+        ensureConfigDefaults();
+        settings = loadSettings();
+        loadSpawn();
+        sender.sendMessage("已重载躲猫猫配置。正在运行的游戏会从下一次相关逻辑开始使用新设置。");
+    }
+
+    private void ensureConfigDefaults() {
+        getConfig().options().copyDefaults(true);
+        saveConfig();
+    }
+
+    private void handleSettingsCommand(CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage("/has settings <list|get|set|reset|reload>");
+            return;
+        }
+
+        switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "list" -> listSettings(sender);
+            case "get" -> {
+                if (args.length < 3) {
+                    sender.sendMessage("/has settings get <path>");
+                    return;
+                }
+                String path = args[2];
+                Object value = getConfig().get(path);
+                sender.sendMessage(path + " = " + (value == null ? "<未设置>" : value));
+            }
+            case "set" -> {
+                if (args.length < 4) {
+                    sender.sendMessage("/has settings set <path> <value>");
+                    return;
+                }
+                setConfigValue(sender, args[2], String.join(" ", Arrays.copyOfRange(args, 3, args.length)));
+            }
+            case "reset" -> {
+                if (args.length < 3) {
+                    sender.sendMessage("/has settings reset <path>");
+                    return;
+                }
+                resetConfigValue(sender, args[2]);
+            }
+            case "reload" -> reloadGameConfig(sender);
+            default -> sender.sendMessage("/has settings <list|get|set|reset|reload>");
+        }
+    }
+
+    private void listSettings(CommandSender sender) {
+        Map<String, Object> values = collectScalarConfigValues(getConfig());
+        if (values.isEmpty()) {
+            sender.sendMessage("当前没有可直接调整的标量设置。");
+            return;
+        }
+        sender.sendMessage("可调整设置：");
+        values.forEach((path, value) -> sender.sendMessage("- " + path + " = " + value));
+    }
+
+    private void setConfigValue(CommandSender sender, String path, String rawValue) {
+        Object template = getConfig().get(path);
+        if (template == null && getConfig().getDefaults() != null) {
+            template = getConfig().getDefaults().get(path);
+        }
+        if (template instanceof ConfigurationSection || template instanceof List<?>) {
+            sender.sendMessage("该路径不是可直接设置的单个数值: " + path);
+            return;
+        }
+
+        Object value = parseConfigValue(template, rawValue);
+        if (value == null) {
+            sender.sendMessage("无法解析数值: " + rawValue);
+            return;
+        }
+
+        getConfig().set(path, value);
+        saveConfig();
+        settings = loadSettings();
+        loadSpawn();
+        sender.sendMessage("已设置 " + path + " = " + value);
+    }
+
+    private void resetConfigValue(CommandSender sender, String path) {
+        if (getConfig().getDefaults() == null || !getConfig().getDefaults().contains(path)) {
+            sender.sendMessage("默认配置中不存在该路径: " + path);
+            return;
+        }
+        Object value = getConfig().getDefaults().get(path);
+        getConfig().set(path, value);
+        saveConfig();
+        settings = loadSettings();
+        loadSpawn();
+        sender.sendMessage("已重置 " + path + " = " + value);
+    }
+
+    private Object parseConfigValue(Object template, String rawValue) {
+        if (template instanceof Boolean) {
+            if (rawValue.equalsIgnoreCase("true") || rawValue.equalsIgnoreCase("false")) {
+                return Boolean.parseBoolean(rawValue);
+            }
+            return null;
+        }
+        if (template instanceof Integer) {
+            try {
+                return Integer.parseInt(rawValue);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        if (template instanceof Long) {
+            try {
+                return Long.parseLong(rawValue);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        if (template instanceof Float || template instanceof Double) {
+            try {
+                return Double.parseDouble(rawValue);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        if (template == null) {
+            return rawValue;
+        }
+        return rawValue;
+    }
+
+    private List<String> tabCompleteSettings(String[] args) {
+        if (args.length == 2) {
+            return filterPrefix(List.of("list", "get", "set", "reset", "reload"), args[1]);
+        }
+        if (args.length == 3 && List.of("get", "set", "reset").contains(args[1].toLowerCase(Locale.ROOT))) {
+            return filterPrefix(new ArrayList<>(collectScalarConfigValues(getConfig()).keySet()), args[2]);
+        }
+        return List.of();
+    }
+
+    private List<String> filterPrefix(List<String> options, String prefix) {
+        String lowerPrefix = prefix.toLowerCase(Locale.ROOT);
+        return options.stream()
+                .filter(option -> option.toLowerCase(Locale.ROOT).startsWith(lowerPrefix))
+                .sorted()
+                .toList();
+    }
+
+    private Map<String, Object> collectScalarConfigValues(ConfigurationSection section) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        collectScalarConfigValues(section, "", values);
+        return values.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .collect(LinkedHashMap::new, (map, entry) -> map.put(entry.getKey(), entry.getValue()), LinkedHashMap::putAll);
+    }
+
+    private void collectScalarConfigValues(ConfigurationSection section, String prefix, Map<String, Object> values) {
+        for (Map.Entry<String, Object> entry : section.getValues(false).entrySet()) {
+            String path = prefix.isEmpty() ? entry.getKey() : prefix + "." + entry.getKey();
+            if (entry.getValue() instanceof ConfigurationSection child) {
+                collectScalarConfigValues(child, path, values);
+            } else if (!(entry.getValue() instanceof List<?>)) {
+                values.put(path, entry.getValue());
+            }
+        }
     }
 
     private void startGame(CommandSender sender) {
@@ -168,17 +348,17 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
         stopGame(false);
         Location spawn = getArenaSpawn();
-        remainingTicks = GAME_TICKS;
+        remainingTicks = settings.durationTicks();
         phase = GamePhase.RUNNING;
         bossBar = Bukkit.createBossBar("躲猫猫 10:00", BarColor.GREEN, BarStyle.SEGMENTED_20);
         bossBar.setProgress(1.0);
 
         Collections.shuffle(online);
-        int seekerCount = online.size() == 1 ? 1 : Math.min(SEEKER_COUNT, online.size() - 1);
+        int seekerCount = online.size() == 1 ? 1 : Math.min(settings.seekerCount(), online.size() - 1);
         for (int i = 0; i < online.size(); i++) {
             Player player = online.get(i);
             Role role = i < seekerCount ? Role.SEEKER : Role.HIDER;
-            GamePlayer state = new GamePlayer(player.getUniqueId(), role);
+            GamePlayer state = new GamePlayer(player.getUniqueId(), role, settings.maxHp(), settings.maxMp());
             players.put(player.getUniqueId(), state);
             setupPlayer(player, state, spawn);
             bossBar.addPlayer(player);
@@ -214,7 +394,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         remainingTicks--;
         updateBossBar();
 
-        if (remainingTicks == SEEKER_RELEASE_AT) {
+        if (remainingTicks == settings.seekerReleaseAt()) {
             Bukkit.broadcast(Component.text("寻找者已释放！"));
             playersWithRole(Role.SEEKER).forEach(player -> {
                 player.removePotionEffect(PotionEffectType.BLINDNESS);
@@ -233,13 +413,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         for (GamePlayer state : players.values()) {
             Player player = Bukkit.getPlayer(state.uuid);
             if (player == null) continue;
-            state.hp = Math.min(MAX_HP, state.hp + 5);
-            state.mp = Math.min(MAX_MP, state.mp + 10);
+            state.hp = Math.min(settings.maxHp(), state.hp + settings.hpRegenPerTick());
+            state.mp = Math.min(settings.maxMp(), state.mp + settings.mpRegenPerTick());
             ensureLoadout(player, state.role);
             if (state.role == Role.HIDER) tickDisguise(player, state);
             player.setFoodLevel(20);
             player.setSaturation(20);
-            player.sendActionBar(Component.text(roleName(state.role) + "  HP " + state.hp + "/" + MAX_HP + "  MP " + state.mp + "/" + MAX_MP));
+            player.sendActionBar(Component.text(roleName(state.role) + "  HP " + state.hp + "/" + settings.maxHp() + "  MP " + state.mp + "/" + settings.maxMp()));
         }
     }
 
@@ -279,19 +459,18 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (bossBar == null) return;
         int seconds = Math.max(0, remainingTicks / 20);
         bossBar.setTitle("躲猫猫 " + seconds / 60 + ":" + String.format("%02d", seconds % 60));
-        bossBar.setProgress(Math.max(0.0, Math.min(1.0, remainingTicks / (double) GAME_TICKS)));
+        bossBar.setProgress(Math.max(0.0, Math.min(1.0, remainingTicks / (double) settings.durationTicks())));
     }
 
     private void updateBorder() {
-        if (remainingTicks == 10800) shrinkBorder(90);
-        if (remainingTicks == 8400) shrinkBorder(75);
-        if (remainingTicks == 6000) shrinkBorder(60);
-        if (remainingTicks == 3600) shrinkBorder(40);
+        for (BorderStage stage : settings.borderStages()) {
+            if (remainingTicks == stage.remainingTicks()) shrinkBorder(stage.size(), stage.seconds());
+        }
     }
 
-    private void shrinkBorder(double size) {
+    private void shrinkBorder(double size, long seconds) {
         WorldBorder border = getArenaSpawn().getWorld().getWorldBorder();
-        border.setSize(size, 3L);
+        border.setSize(size, seconds);
         Bukkit.broadcast(Component.text("世界边界正在缩小。"));
     }
 
@@ -340,7 +519,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         decoys.clear();
         players.clear();
         World world = getArenaSpawn().getWorld();
-        if (world != null) world.getWorldBorder().setSize(100000.0);
+        if (world != null) world.getWorldBorder().setSize(settings.borderResetSize());
         phase = GamePhase.IDLE;
         remainingTicks = 0;
         if (announce) Bukkit.broadcast(Component.text("躲猫猫已停止。"));
@@ -349,8 +528,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void setupWorldBorder(Location center) {
         WorldBorder border = center.getWorld().getWorldBorder();
         border.setCenter(center);
-        border.setSize(128.0);
-        border.setDamageBuffer(0.0);
+        border.setSize(settings.borderInitialSize());
+        border.setDamageBuffer(settings.borderDamageBuffer());
     }
 
     private void spawnDisguiseDisplay(Player player, GamePlayer state) {
@@ -447,10 +626,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             case "release" -> releaseDisguise(player, state);
             case "rotation_lock" -> toggleRotationLock(player, state);
             case "decoy" -> useDecoy(player, state);
-            case "fly_hider" -> useFly(player, state, Role.HIDER, HIDER_FLY_MP, 1.85);
+            case "fly_hider" -> useFly(player, state, Role.HIDER, settings.hiderFlyMp(), settings.hiderFlyPower(), settings.hiderFlyMinYBoost());
             case "attack_bullet" -> useAttackBullet(player, state);
             case "scan" -> useScan(player, state);
-            case "fly_seeker" -> useFly(player, state, Role.SEEKER, SEEKER_FLY_MP, 1.55);
+            case "fly_seeker" -> useFly(player, state, Role.SEEKER, settings.seekerFlyMp(), settings.seekerFlyPower(), settings.seekerFlyMinYBoost());
             default -> {
             }
         }
@@ -458,7 +637,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void useDisguise(Player player, GamePlayer state) {
         if (state.role != Role.HIDER) return;
-        Block target = player.getTargetBlockExact(15, FluidCollisionMode.NEVER);
+        Block target = player.getTargetBlockExact(settings.disguiseRange(), FluidCollisionMode.NEVER);
         if (target == null || target.getType().isAir() || !target.getType().isBlock() || isBlockedDisguise(target.getType())) {
             fail(player, "不能伪装成这个方块。");
             return;
@@ -500,7 +679,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             fail(player, "需要先伪装才能放置诱饵。");
             return;
         }
-        if (!consumeMp(player, state, DECOY_MP)) return;
+        if (!consumeMp(player, state, settings.decoyMp())) return;
 
         Vector forward = player.getLocation().getDirection().setY(0);
         if (forward.lengthSquared() < 0.001) forward = new Vector(1, 0, 0);
@@ -514,16 +693,16 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             spawned.setPersistent(false);
             applyDisguiseTransform(spawned, state.lockedYaw);
         });
-        decoys.add(new Decoy(player.getUniqueId(), display, DECOY_HP, DECOY_LIFETIME));
+        decoys.add(new Decoy(player.getUniqueId(), display, settings.decoyHp(), settings.decoyLifetimeTicks()));
         player.playSound(player.getLocation(), Sound.ENTITY_SNOWBALL_THROW, 1f, 0.8f);
     }
 
-    private void useFly(Player player, GamePlayer state, Role requiredRole, int cost, double power) {
+    private void useFly(Player player, GamePlayer state, Role requiredRole, int cost, double power, double minYBoost) {
         if (state.role != requiredRole) return;
         if (!consumeMp(player, state, cost)) return;
         if (requiredRole == Role.HIDER) releaseDisguise(player, state);
         Vector velocity = player.getEyeLocation().getDirection().normalize().multiply(power);
-        velocity.setY(Math.max(velocity.getY(), 0.45));
+        velocity.setY(Math.max(velocity.getY(), minYBoost));
         player.setVelocity(velocity);
         player.getWorld().spawnParticle(Particle.CLOUD, player.getLocation(), 18, 0.25, 0.15, 0.25, 0.02);
         player.playSound(player.getLocation(), Sound.ENTITY_BREEZE_JUMP, 1f, 1f);
@@ -531,21 +710,21 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void useAttackBullet(Player player, GamePlayer state) {
         if (state.role != Role.SEEKER) return;
-        if (!consumeMp(player, state, ATTACK_MP)) return;
+        if (!consumeMp(player, state, settings.attackBulletMp())) return;
         Snowball snowball = player.launchProjectile(Snowball.class);
-        snowball.setVelocity(player.getEyeLocation().getDirection().normalize().multiply(2.2));
+        snowball.setVelocity(player.getEyeLocation().getDirection().normalize().multiply(settings.attackBulletSpeed()));
         snowball.getPersistentDataContainer().set(attackKey, PersistentDataType.BYTE, (byte) 1);
         player.playSound(player.getLocation(), Sound.ENTITY_SNOWBALL_THROW, 1f, 1.4f);
     }
 
     private void useScan(Player player, GamePlayer state) {
         if (state.role != Role.SEEKER) return;
-        if (!consumeMp(player, state, SCAN_MP)) return;
+        if (!consumeMp(player, state, settings.scanMp())) return;
         player.getWorld().spawnParticle(Particle.SONIC_BOOM, player.getLocation().add(0, 1, 0), 1);
         player.playSound(player.getLocation(), Sound.ENTITY_WARDEN_SONIC_BOOM, 0.6f, 1.4f);
         boolean found = playersWithRole(Role.HIDER).stream()
-                .anyMatch(hider -> hider.getWorld().equals(player.getWorld()) && hider.getLocation().distance(player.getLocation()) <= SCAN_RADIUS);
-        Bukkit.getScheduler().runTaskLater(this, () -> player.sendMessage(found ? "扫描范围内发现躲藏者。" : "扫描范围内没有发现躲藏者。"), 20L);
+                .anyMatch(hider -> hider.getWorld().equals(player.getWorld()) && hider.getLocation().distance(player.getLocation()) <= settings.scanRadius());
+        Bukkit.getScheduler().runTaskLater(this, () -> player.sendMessage(found ? "扫描范围内发现躲藏者。" : "扫描范围内没有发现躲藏者。"), settings.scanResultDelayTicks());
     }
 
     @EventHandler
@@ -556,10 +735,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (event.getHitEntity() instanceof Player player && damagedPlayers.add(player.getUniqueId())) {
             damageIfHider(player);
         }
-        for (Entity nearby : projectile.getNearbyEntities(1.75, 1.75, 1.75)) {
+        double hitRadius = settings.attackBulletHitRadius();
+        for (Entity nearby : projectile.getNearbyEntities(hitRadius, hitRadius, hitRadius)) {
             if (nearby instanceof Player player && damagedPlayers.add(player.getUniqueId())) damageIfHider(player);
         }
-        damageNearbyDecoy(projectile.getLocation(), DAMAGE_PER_HIT);
+        damageNearbyDecoy(projectile.getLocation(), settings.damagePerHit());
         projectile.getWorld().spawnParticle(Particle.CRIT, projectile.getLocation(), 16, 0.2, 0.2, 0.2, 0.05);
         projectile.remove();
     }
@@ -571,7 +751,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (state == null) return;
         event.setCancelled(true);
         if (state.role == Role.HIDER && !(event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Snowball)) {
-            damageHider(player, state, DAMAGE_PER_HIT);
+            damageHider(player, state, settings.damagePerHit());
         }
     }
 
@@ -586,7 +766,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void damageIfHider(Player player) {
         GamePlayer target = players.get(player.getUniqueId());
-        if (target != null && target.role == Role.HIDER) damageHider(player, target, DAMAGE_PER_HIT);
+        if (target != null && target.role == Role.HIDER) damageHider(player, target, settings.damagePerHit());
     }
 
     private void damageHider(Player player, GamePlayer state, int damage) {
@@ -599,7 +779,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void damageNearbyDecoy(Location location, int damage) {
         for (Decoy decoy : decoys) {
             if (decoy.display != null && decoy.display.getWorld().equals(location.getWorld())
-                    && decoy.display.getLocation().distance(location) <= 1.75) {
+                    && decoy.display.getLocation().distance(location) <= settings.attackBulletHitRadius()) {
                 decoy.hp -= damage;
             }
         }
@@ -612,8 +792,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             state.display = null;
         }
         state.role = Role.SEEKER;
-        state.hp = MAX_HP;
-        state.mp = MAX_MP;
+        state.hp = settings.maxHp();
+        state.mp = settings.maxMp();
         player.teleport(getArenaSpawn());
         giveSeekerLoadout(player);
         player.sendTitle("你被发现了", "现在加入寻找者", 10, 60, 10);
@@ -664,7 +844,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     @EventHandler
     public void onMove(PlayerMoveEvent event) {
-        if (phase != GamePhase.RUNNING || remainingTicks <= SEEKER_RELEASE_AT) return;
+        if (phase != GamePhase.RUNNING || remainingTicks <= settings.seekerReleaseAt()) return;
         GamePlayer state = players.get(event.getPlayer().getUniqueId());
         if (state == null || state.role != Role.SEEKER) return;
         Location from = event.getFrom();
@@ -773,6 +953,111 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         saveConfig();
     }
 
+    private GameSettings loadSettings() {
+        int durationTicks = positiveInt("game.durationTicks");
+        int seekerReleaseDelayTicks = nonNegativeInt("game.seekerReleaseDelayTicks");
+        return new GameSettings(
+                durationTicks,
+                Math.max(1, getConfig().getInt("game.seekerCount")),
+                Math.max(0, durationTicks - seekerReleaseDelayTicks),
+                positiveInt("player.hp"),
+                positiveInt("player.mp"),
+                nonNegativeInt("player.hpRegenPerTick"),
+                nonNegativeInt("player.mpRegenPerTick"),
+                positiveInt("player.damagePerHit"),
+                positiveInt("abilities.disguise.range"),
+                positiveInt("abilities.decoy.hp"),
+                nonNegativeInt("abilities.decoy.mp"),
+                positiveInt("abilities.decoy.lifetimeTicks"),
+                nonNegativeInt("abilities.flyHider.mp"),
+                positiveDouble("abilities.flyHider.power"),
+                nonNegativeDouble("abilities.flyHider.minYBoost"),
+                nonNegativeInt("abilities.flySeeker.mp"),
+                positiveDouble("abilities.flySeeker.power"),
+                nonNegativeDouble("abilities.flySeeker.minYBoost"),
+                nonNegativeInt("abilities.attackBullet.mp"),
+                positiveDouble("abilities.attackBullet.speed"),
+                positiveDouble("abilities.attackBullet.hitRadius"),
+                nonNegativeInt("abilities.scan.mp"),
+                positiveDouble("abilities.scan.radius"),
+                nonNegativeLong("abilities.scan.resultDelayTicks"),
+                positiveDouble("worldBorder.initialSize"),
+                positiveDouble("worldBorder.resetSize"),
+                nonNegativeDouble("worldBorder.damageBuffer"),
+                loadBorderStages()
+        );
+    }
+
+    private List<BorderStage> loadBorderStages() {
+        List<BorderStage> stages = new ArrayList<>();
+        for (Map<?, ?> map : getConfig().getMapList("worldBorder.stages")) {
+            Object remainingTicks = map.get("remainingTicks");
+            Object size = map.get("size");
+            Object seconds = map.get("seconds");
+            if (remainingTicks instanceof Number tickNumber && size instanceof Number sizeNumber) {
+                long secondsValue = seconds instanceof Number secondsNumber ? Math.max(0L, secondsNumber.longValue()) : 3L;
+                stages.add(new BorderStage(Math.max(0, tickNumber.intValue()), Math.max(1.0, sizeNumber.doubleValue()), secondsValue));
+            }
+        }
+        stages.sort(Comparator.comparingInt(BorderStage::remainingTicks).reversed());
+        return List.copyOf(stages);
+    }
+
+    private int positiveInt(String path) {
+        return Math.max(1, getConfig().getInt(path));
+    }
+
+    private int nonNegativeInt(String path) {
+        return Math.max(0, getConfig().getInt(path));
+    }
+
+    private long nonNegativeLong(String path) {
+        return Math.max(0L, getConfig().getLong(path));
+    }
+
+    private double positiveDouble(String path) {
+        return Math.max(0.001, getConfig().getDouble(path));
+    }
+
+    private double nonNegativeDouble(String path) {
+        return Math.max(0.0, getConfig().getDouble(path));
+    }
+
+    private record GameSettings(
+            int durationTicks,
+            int seekerCount,
+            int seekerReleaseAt,
+            int maxHp,
+            int maxMp,
+            int hpRegenPerTick,
+            int mpRegenPerTick,
+            int damagePerHit,
+            int disguiseRange,
+            int decoyHp,
+            int decoyMp,
+            int decoyLifetimeTicks,
+            int hiderFlyMp,
+            double hiderFlyPower,
+            double hiderFlyMinYBoost,
+            int seekerFlyMp,
+            double seekerFlyPower,
+            double seekerFlyMinYBoost,
+            int attackBulletMp,
+            double attackBulletSpeed,
+            double attackBulletHitRadius,
+            int scanMp,
+            double scanRadius,
+            long scanResultDelayTicks,
+            double borderInitialSize,
+            double borderResetSize,
+            double borderDamageBuffer,
+            List<BorderStage> borderStages
+    ) {
+    }
+
+    private record BorderStage(int remainingTicks, double size, long seconds) {
+    }
+
     private enum GamePhase {
         IDLE,
         RUNNING
@@ -786,17 +1071,19 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private static final class GamePlayer {
         private final UUID uuid;
         private Role role;
-        private int hp = MAX_HP;
-        private int mp = MAX_MP;
+        private int hp;
+        private int mp;
         private boolean disguised;
         private boolean rotationLocked;
         private float lockedYaw;
         private BlockData disguiseData;
         private BlockDisplay display;
 
-        private GamePlayer(UUID uuid, Role role) {
+        private GamePlayer(UUID uuid, Role role, int hp, int mp) {
             this.uuid = uuid;
             this.role = role;
+            this.hp = hp;
+            this.mp = mp;
             this.disguiseData = Bukkit.createBlockData(Material.AIR);
         }
     }

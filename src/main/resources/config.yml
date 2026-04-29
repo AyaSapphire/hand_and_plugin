@@ -1,3 +1,57 @@
 # Optional arena spawn saved by /has setspawn.
 # If unset, the plugin uses the world's normal spawn location.
 arena: {}
+
+game:
+  durationTicks: 12000
+  seekerCount: 3
+  seekerReleaseDelayTicks: 600
+
+player:
+  hp: 2000
+  mp: 2000
+  hpRegenPerTick: 5
+  mpRegenPerTick: 10
+  damagePerHit: 400
+
+abilities:
+  disguise:
+    range: 15
+  decoy:
+    hp: 100
+    mp: 1200
+    lifetimeTicks: 600
+  flyHider:
+    mp: 1600
+    power: 1.85
+    minYBoost: 0.45
+  flySeeker:
+    mp: 300
+    power: 1.55
+    minYBoost: 0.45
+  attackBullet:
+    mp: 60
+    speed: 2.2
+    hitRadius: 1.75
+  scan:
+    mp: 1300
+    radius: 10.0
+    resultDelayTicks: 20
+
+worldBorder:
+  initialSize: 128.0
+  resetSize: 100000.0
+  damageBuffer: 0.0
+  stages:
+    - remainingTicks: 10800
+      size: 90.0
+      seconds: 3
+    - remainingTicks: 8400
+      size: 75.0
+      seconds: 3
+    - remainingTicks: 6000
+      size: 60.0
+      seconds: 3
+    - remainingTicks: 3600
+      size: 40.0
+      seconds: 3
