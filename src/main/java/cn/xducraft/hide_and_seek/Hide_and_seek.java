@@ -242,16 +242,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
 
         Location loc = player.getLocation().clone();
+        float visualYaw = state.rotationLocked ? state.lockedYaw : loc.getYaw();
         loc.setPitch(0f);
-        if (!state.rotationLocked) state.lockedYaw = loc.getYaw();
+        loc.setYaw(0f);
+        if (!state.rotationLocked) state.lockedYaw = visualYaw;
         state.display.teleport(loc);
-        state.display.setRotation(state.lockedYaw, 0f);
-        state.display.setTransformation(new Transformation(
-                new Vector3f(-0.5f, 0.001f, -0.5f),
-                new Quaternionf(new AxisAngle4f((float) Math.toRadians(-state.lockedYaw), 0f, 1f, 0f)),
-                new Vector3f(1f, 1f, 1f),
-                new Quaternionf()
-        ));
+        applyDisguiseTransform(state.display, visualYaw);
 
         if (state.disguised) {
             player.addPotionEffect(new PotionEffect(PotionEffectType.INVISIBILITY, 40, 0, false, false, false));
@@ -357,13 +353,23 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             display.setBlock(data);
             display.setPersistent(false);
             display.setTeleportDuration(1);
-            display.setTransformation(new Transformation(
-                    new Vector3f(-0.5f, 0.001f, -0.5f),
-                    new Quaternionf(),
-                    new Vector3f(1f, 1f, 1f),
-                    new Quaternionf()
-            ));
+            display.setRotation(0f, 0f);
+            applyDisguiseTransform(display, state.lockedYaw);
         });
+    }
+
+    private void applyDisguiseTransform(BlockDisplay display, float yaw) {
+        float radians = (float) Math.toRadians(-yaw);
+        Vector3f translation = new Vector3f(0.5f, 0f, 0.5f).rotateY(radians).negate();
+        translation.y = 0.001f;
+
+        display.setRotation(0f, 0f);
+        display.setTransformation(new Transformation(
+                translation,
+                new Quaternionf(new AxisAngle4f(radians, 0f, 1f, 0f)),
+                new Vector3f(1f, 1f, 1f),
+                new Quaternionf()
+        ));
     }
 
     private void giveHiderLoadout(Player player) {
@@ -469,17 +475,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (forward.lengthSquared() < 0.001) forward = new Vector(1, 0, 0);
         Location loc = player.getLocation().add(forward.normalize().multiply(2.0));
         loc.setY(player.getLocation().getY());
+        loc.setYaw(0f);
+        loc.setPitch(0f);
 
         BlockDisplay display = player.getWorld().spawn(loc, BlockDisplay.class, spawned -> {
             spawned.setBlock(state.disguiseData);
             spawned.setPersistent(false);
-            spawned.setRotation(state.lockedYaw, 0f);
-            spawned.setTransformation(new Transformation(
-                    new Vector3f(-0.5f, 0.001f, -0.5f),
-                    new Quaternionf(),
-                    new Vector3f(1f, 1f, 1f),
-                    new Quaternionf()
-            ));
+            applyDisguiseTransform(spawned, state.lockedYaw);
         });
         decoys.add(new Decoy(player.getUniqueId(), display, DECOY_HP, DECOY_LIFETIME));
         player.playSound(player.getLocation(), Sound.ENTITY_SNOWBALL_THROW, 1f, 0.8f);
