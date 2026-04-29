@@ -1,0 +1,3 @@
+# Optional arena spawn saved by /has setspawn.
+# If unset, the plugin uses the world's normal spawn location.
+arena: {}

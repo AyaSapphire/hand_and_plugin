@@ -3,6 +3,7 @@
 
 # Gradle cache folder
 .gradle
+.gradle-user-home/
 
 # Gradle build folder
 build
@@ -19,3 +20,5 @@ hs_err_pid*
 
 # Common working directory
 run
+
+bin

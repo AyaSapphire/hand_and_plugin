@@ -4,3 +4,14 @@ version: '${version}'
 main: cn.xducraft.hide_and_seek.Hide_and_seek
 api-version: '1.21.11'
 load: POSTWORLD
+commands:
+  has:
+    description: Hide and Seek game command
+    usage: /has <start|stop|setspawn|status>
+    aliases:
+      - hideandseek
+      - hs
+permissions:
+  hide_and_seek.admin:
+    description: Allows controlling Hide and Seek games
+    default: op
