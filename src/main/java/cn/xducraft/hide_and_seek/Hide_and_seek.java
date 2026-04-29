@@ -9,6 +9,7 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
+import org.bukkit.Tag;
 import org.bukkit.World;
 import org.bukkit.WorldBorder;
 import org.bukkit.attribute.Attribute;
@@ -134,6 +135,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             case "status" -> sendStatus(sender);
             case "reload" -> reloadGameConfig(sender);
             case "settings", "config" -> handleSettingsCommand(sender, args);
+            case "blacklist" -> handleBlacklistCommand(sender, args);
             case "help" -> sendHelp(sender);
             default -> sendHelp(sender);
         }
@@ -145,9 +147,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (args.length > 1 && (args[0].equalsIgnoreCase("settings") || args[0].equalsIgnoreCase("config"))) {
             return tabCompleteSettings(args);
         }
+        if (args.length > 1 && args[0].equalsIgnoreCase("blacklist")) {
+            return tabCompleteBlacklist(args);
+        }
         if (args.length != 1) return List.of();
         String prefix = args[0].toLowerCase(Locale.ROOT);
-        return List.of("help", "start", "stop", "setspawn", "status", "reload", "settings").stream()
+        return List.of("help", "start", "stop", "setspawn", "status", "reload", "settings", "blacklist").stream()
                 .filter(option -> option.startsWith(prefix))
                 .toList();
     }
@@ -159,6 +164,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         sender.sendMessage("/has status - 查看当前游戏和关键设置");
         sender.sendMessage("/has reload - 重载 config.yml");
         sender.sendMessage("/has settings list|get|set|reset - 查看和调整玩法设置");
+        sender.sendMessage("/has blacklist list|add|remove - 查看和调整伪装黑名单");
     }
 
     private void sendStatus(CommandSender sender) {
@@ -215,6 +221,73 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             case "reload" -> reloadGameConfig(sender);
             default -> sender.sendMessage("/has settings <list|get|set|reset|reload>");
         }
+    }
+
+    private void handleBlacklistCommand(CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage("/has blacklist <list|add|remove|reload>");
+            return;
+        }
+
+        switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "list" -> listDisguiseBlacklist(sender);
+            case "add" -> {
+                if (args.length < 3) {
+                    sender.sendMessage("/has blacklist add <minecraft:block|#minecraft:tag>");
+                    return;
+                }
+                addDisguiseBlacklistEntry(sender, args[2]);
+            }
+            case "remove" -> {
+                if (args.length < 3) {
+                    sender.sendMessage("/has blacklist remove <minecraft:block|#minecraft:tag>");
+                    return;
+                }
+                removeDisguiseBlacklistEntry(sender, args[2]);
+            }
+            case "reload" -> reloadGameConfig(sender);
+            default -> sender.sendMessage("/has blacklist <list|add|remove|reload>");
+        }
+    }
+
+    private void listDisguiseBlacklist(CommandSender sender) {
+        List<String> entries = getConfig().getStringList("abilities.disguise.blacklist");
+        sender.sendMessage("伪装黑名单配置项: " + entries.size() + "，展开后方块数: " + settings.disguiseBlacklist().size());
+        entries.stream().sorted().forEach(entry -> sender.sendMessage("- " + entry));
+    }
+
+    private void addDisguiseBlacklistEntry(CommandSender sender, String rawEntry) {
+        String entry = normalizeBlockListEntry(rawEntry);
+        if (!isValidBlockListEntry(entry)) {
+            sender.sendMessage("无法识别方块或标签: " + rawEntry);
+            return;
+        }
+
+        List<String> entries = new ArrayList<>(getConfig().getStringList("abilities.disguise.blacklist"));
+        if (entries.stream().anyMatch(existing -> existing.equalsIgnoreCase(entry))) {
+            sender.sendMessage("该项已经在伪装黑名单中: " + entry);
+            return;
+        }
+        entries.add(entry);
+        entries.sort(String::compareToIgnoreCase);
+        getConfig().set("abilities.disguise.blacklist", entries);
+        saveConfig();
+        settings = loadSettings();
+        sender.sendMessage("已加入伪装黑名单: " + entry);
+    }
+
+    private void removeDisguiseBlacklistEntry(CommandSender sender, String rawEntry) {
+        String entry = normalizeBlockListEntry(rawEntry);
+        List<String> entries = new ArrayList<>(getConfig().getStringList("abilities.disguise.blacklist"));
+        boolean removed = entries.removeIf(existing -> existing.equalsIgnoreCase(entry));
+        if (!removed) {
+            sender.sendMessage("伪装黑名单中没有该项: " + entry);
+            return;
+        }
+        getConfig().set("abilities.disguise.blacklist", entries);
+        saveConfig();
+        settings = loadSettings();
+        sender.sendMessage("已移出伪装黑名单: " + entry);
     }
 
     private void listSettings(CommandSender sender) {
@@ -307,6 +380,29 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return List.of();
     }
 
+    private List<String> tabCompleteBlacklist(String[] args) {
+        if (args.length == 2) {
+            return filterPrefix(List.of("list", "add", "remove", "reload"), args[1]);
+        }
+        if (args.length == 3 && args[1].equalsIgnoreCase("remove")) {
+            return filterPrefix(getConfig().getStringList("abilities.disguise.blacklist"), args[2]);
+        }
+        if (args.length == 3 && args[1].equalsIgnoreCase("add")) {
+            return filterPrefix(List.of(
+                    "minecraft:water",
+                    "minecraft:lava",
+                    "minecraft:bedrock",
+                    "minecraft:command_block",
+                    "#minecraft:banners",
+                    "#minecraft:doors",
+                    "#minecraft:heads",
+                    "#minecraft:tall_flowers",
+                    "#minecraft:all_signs"
+            ), args[2]);
+        }
+        return List.of();
+    }
+
     private List<String> filterPrefix(List<String> options, String prefix) {
         String lowerPrefix = prefix.toLowerCase(Locale.ROOT);
         return options.stream()
@@ -321,6 +417,22 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return values.entrySet().stream()
                 .sorted(Map.Entry.comparingByKey())
                 .collect(LinkedHashMap::new, (map, entry) -> map.put(entry.getKey(), entry.getValue()), LinkedHashMap::putAll);
+    }
+
+    private String normalizeBlockListEntry(String rawEntry) {
+        String entry = rawEntry.trim().toLowerCase(Locale.ROOT);
+        boolean tagEntry = entry.startsWith("#");
+        if (tagEntry) entry = entry.substring(1);
+        if (!entry.contains(":")) entry = "minecraft:" + entry;
+        return tagEntry ? "#" + entry : entry;
+    }
+
+    private boolean isValidBlockListEntry(String entry) {
+        if (entry.startsWith("#")) {
+            return resolveBlockTag(entry.substring(1)) != null;
+        }
+        Material material = Material.matchMaterial(entry);
+        return material != null && material.isBlock();
     }
 
     private void collectScalarConfigValues(ConfigurationSection section, String prefix, Map<String, Object> values) {
@@ -672,9 +784,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private boolean isBlockedDisguise(Material material) {
-        return Set.of(Material.AIR, Material.CAVE_AIR, Material.VOID_AIR, Material.BARRIER, Material.STRUCTURE_VOID,
-                Material.COMMAND_BLOCK, Material.CHAIN_COMMAND_BLOCK, Material.REPEATING_COMMAND_BLOCK, Material.JIGSAW,
-                Material.STRUCTURE_BLOCK).contains(material);
+        return settings.disguiseBlacklist().contains(material);
     }
 
     private void releaseDisguise(Player player, GamePlayer state) {
@@ -992,6 +1102,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 positiveInt("player.damagePerHit"),
                 positiveInt("abilities.disguise.range"),
                 clampedDouble("abilities.disguise.rotationSnapDegrees", 0.0, 360.0),
+                loadDisguiseBlacklist(),
                 positiveInt("abilities.decoy.hp"),
                 nonNegativeInt("abilities.decoy.mp"),
                 positiveInt("abilities.decoy.lifetimeTicks"),
@@ -1027,6 +1138,46 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
         stages.sort(Comparator.comparingInt(BorderStage::remainingTicks).reversed());
         return List.copyOf(stages);
+    }
+
+    private Set<Material> loadDisguiseBlacklist() {
+        Set<Material> blacklist = new HashSet<>();
+        blacklist.addAll(Set.of(
+                Material.AIR,
+                Material.CAVE_AIR,
+                Material.VOID_AIR,
+                Material.BARRIER,
+                Material.STRUCTURE_VOID
+        ));
+
+        for (String rawEntry : getConfig().getStringList("abilities.disguise.blacklist")) {
+            String entry = normalizeBlockListEntry(rawEntry);
+            if (entry.startsWith("#")) {
+                Tag<Material> tag = resolveBlockTag(entry.substring(1));
+                if (tag == null) {
+                    getLogger().warning("Unknown disguise blacklist block tag: " + entry);
+                    continue;
+                }
+                tag.getValues().stream()
+                        .filter(Material::isBlock)
+                        .forEach(blacklist::add);
+                continue;
+            }
+
+            Material material = Material.matchMaterial(entry);
+            if (material == null || !material.isBlock()) {
+                getLogger().warning("Unknown disguise blacklist block: " + entry);
+                continue;
+            }
+            blacklist.add(material);
+        }
+        return Set.copyOf(blacklist);
+    }
+
+    private Tag<Material> resolveBlockTag(String key) {
+        NamespacedKey namespacedKey = NamespacedKey.fromString(key);
+        if (namespacedKey == null) return null;
+        return Bukkit.getTag(Tag.REGISTRY_BLOCKS, namespacedKey, Material.class);
     }
 
     private int positiveInt(String path) {
@@ -1068,6 +1219,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             int damagePerHit,
             int disguiseRange,
             double disguiseRotationSnapDegrees,
+            Set<Material> disguiseBlacklist,
             int decoyHp,
             int decoyMp,
             int decoyLifetimeTicks,

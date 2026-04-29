@@ -18,6 +18,34 @@ abilities:
   disguise:
     range: 15
     rotationSnapDegrees: 22.5
+    blacklist:
+      - minecraft:water
+      - minecraft:lava
+      - minecraft:enchanting_table
+      - minecraft:spore_blossom
+      - minecraft:vine
+      - minecraft:hanging_roots
+      - minecraft:pitcher_crop
+      - minecraft:cocoa
+      - minecraft:bell
+      - minecraft:ladder
+      - minecraft:decorated_pot
+      - minecraft:tripwire
+      - minecraft:piston
+      - minecraft:sticky_piston
+      - minecraft:piston_head
+      - minecraft:command_block
+      - minecraft:chain_command_block
+      - minecraft:repeating_command_block
+      - minecraft:jigsaw
+      - minecraft:structure_block
+      - minecraft:end_portal
+      - minecraft:nether_portal
+      - '#minecraft:banners'
+      - '#minecraft:doors'
+      - '#minecraft:heads'
+      - '#minecraft:tall_flowers'
+      - '#minecraft:all_signs'
   decoy:
     hp: 100
     mp: 1200
