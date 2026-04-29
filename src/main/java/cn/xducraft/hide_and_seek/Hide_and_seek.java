@@ -33,10 +33,15 @@ import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerSwapHandItemsEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -60,6 +65,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 
@@ -229,6 +235,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (player == null) continue;
             state.hp = Math.min(MAX_HP, state.hp + 5);
             state.mp = Math.min(MAX_MP, state.mp + 10);
+            ensureLoadout(player, state.role);
             if (state.role == Role.HIDER) tickDisguise(player, state);
             player.setFoodLevel(20);
             player.setSaturation(20);
@@ -318,13 +325,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
 
         for (GamePlayer state : players.values()) {
-            if (state.display != null) state.display.remove();
             Player player = Bukkit.getPlayer(state.uuid);
             if (player != null) {
-                player.removePotionEffect(PotionEffectType.INVISIBILITY);
-                player.removePotionEffect(PotionEffectType.BLINDNESS);
-                player.removePotionEffect(PotionEffectType.SLOWNESS);
-                player.getInventory().remove(Material.CARROT_ON_A_STICK);
+                cleanupPlayer(player, state);
+            } else if (state.display != null) {
+                state.display.remove();
+                state.display = null;
             }
         }
         for (Decoy decoy : decoys) {
@@ -388,6 +394,27 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         inv.setItem(2, abilityItem("fly_seeker", "寻找者跳跃", List.of("向视线方向位移")));
     }
 
+    private void ensureLoadout(Player player, Role role) {
+        if (role == Role.HIDER) {
+            ensureAbility(player, 0, "disguise", "伪装", List.of("右键目标方块进行伪装"));
+            ensureAbility(player, 1, "release", "解除伪装", List.of("右键恢复原形"));
+            ensureAbility(player, 2, "rotation_lock", "旋转锁定", List.of("右键切换伪装旋转锁定"));
+            ensureAbility(player, 3, "decoy", "诱饵", List.of("消耗 MP 放置一个伪装诱饵"));
+            ensureAbility(player, 4, "fly_hider", "躲藏者跳跃", List.of("解除伪装并向视线方向位移"));
+        } else {
+            ensureAbility(player, 0, "attack_bullet", "攻击弹", List.of("命中躲藏者造成伤害"));
+            ensureAbility(player, 1, "scan", "扫描", List.of("提示附近是否存在躲藏者"));
+            ensureAbility(player, 2, "fly_seeker", "寻找者跳跃", List.of("向视线方向位移"));
+        }
+    }
+
+    private void ensureAbility(Player player, int slot, String ability, String name, List<String> lore) {
+        ItemStack current = player.getInventory().getItem(slot);
+        if (!ability.equals(getAbility(current))) {
+            player.getInventory().setItem(slot, abilityItem(ability, name, lore));
+        }
+    }
+
     private ItemStack abilityItem(String ability, String name, List<String> lore) {
         ItemStack item = new ItemStack(Material.CARROT_ON_A_STICK);
         ItemMeta meta = item.getItemMeta();
@@ -404,6 +431,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     public void onInteract(PlayerInteractEvent event) {
         if (phase != GamePhase.RUNNING) return;
         if (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        if (event.getHand() != EquipmentSlot.HAND) {
+            if (hasNoDrop(event.getItem())) event.setCancelled(true);
+            return;
+        }
         Player player = event.getPlayer();
         GamePlayer state = players.get(player.getUniqueId());
         if (state == null) return;
@@ -521,9 +552,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     public void onProjectileHit(ProjectileHitEvent event) {
         Projectile projectile = event.getEntity();
         if (!projectile.getPersistentDataContainer().has(attackKey, PersistentDataType.BYTE)) return;
-        if (event.getHitEntity() instanceof Player player) damageIfHider(player);
+        Set<UUID> damagedPlayers = new HashSet<>();
+        if (event.getHitEntity() instanceof Player player && damagedPlayers.add(player.getUniqueId())) {
+            damageIfHider(player);
+        }
         for (Entity nearby : projectile.getNearbyEntities(1.75, 1.75, 1.75)) {
-            if (nearby instanceof Player player) damageIfHider(player);
+            if (nearby instanceof Player player && damagedPlayers.add(player.getUniqueId())) damageIfHider(player);
         }
         damageNearbyDecoy(projectile.getLocation(), DAMAGE_PER_HIT);
         projectile.getWorld().spawnParticle(Particle.CRIT, projectile.getLocation(), 16, 0.2, 0.2, 0.2, 0.05);
@@ -547,7 +581,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 && snowball.getPersistentDataContainer().has(attackKey, PersistentDataType.BYTE)
                 && event.getEntity() instanceof Player player) {
             event.setCancelled(true);
-            damageIfHider(player);
         }
     }
 
@@ -613,6 +646,23 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     @EventHandler
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (hasNoDrop(event.getOldCursor()) || hasNoDrop(event.getCursor())) event.setCancelled(true);
+    }
+
+    @EventHandler
+    public void onSwapHandItems(PlayerSwapHandItemsEvent event) {
+        if (hasNoDrop(event.getMainHandItem()) || hasNoDrop(event.getOffHandItem())) event.setCancelled(true);
+    }
+
+    @EventHandler
+    public void onItemHeld(PlayerItemHeldEvent event) {
+        if (phase != GamePhase.RUNNING) return;
+        GamePlayer state = players.get(event.getPlayer().getUniqueId());
+        if (state != null) ensureLoadout(event.getPlayer(), state.role);
+    }
+
+    @EventHandler
     public void onMove(PlayerMoveEvent event) {
         if (phase != GamePhase.RUNNING || remainingTicks <= SEEKER_RELEASE_AT) return;
         GamePlayer state = players.get(event.getPlayer().getUniqueId());
@@ -626,7 +676,45 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
-        if (bossBar != null) bossBar.addPlayer(event.getPlayer());
+        GamePlayer state = players.get(event.getPlayer().getUniqueId());
+        if (bossBar != null && state != null) {
+            bossBar.addPlayer(event.getPlayer());
+            ensureLoadout(event.getPlayer(), state.role);
+        }
+    }
+
+    @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        GamePlayer state = players.remove(event.getPlayer().getUniqueId());
+        if (state == null) return;
+        if (bossBar != null) bossBar.removePlayer(event.getPlayer());
+        cleanupPlayer(event.getPlayer(), state);
+        if (phase == GamePhase.RUNNING) {
+            Bukkit.broadcast(Component.text(event.getPlayer().getName() + " 已离开本局躲猫猫。"));
+            if (players.isEmpty()) {
+                stopGame(false);
+            } else {
+                checkWin();
+            }
+        }
+    }
+
+    private void cleanupPlayer(Player player, GamePlayer state) {
+        if (state.display != null) {
+            state.display.remove();
+            state.display = null;
+        }
+        player.removePotionEffect(PotionEffectType.INVISIBILITY);
+        player.removePotionEffect(PotionEffectType.BLINDNESS);
+        player.removePotionEffect(PotionEffectType.SLOWNESS);
+        removeAbilityItems(player.getInventory());
+    }
+
+    private void removeAbilityItems(PlayerInventory inventory) {
+        for (int i = 0; i < inventory.getSize(); i++) {
+            if (getAbility(inventory.getItem(i)) != null) inventory.setItem(i, null);
+        }
+        if (getAbility(inventory.getItemInOffHand()) != null) inventory.setItemInOffHand(null);
     }
 
     private String getAbility(ItemStack item) {
