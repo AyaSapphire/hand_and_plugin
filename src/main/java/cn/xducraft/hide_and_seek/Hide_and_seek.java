@@ -2,6 +2,7 @@ package cn.xducraft.hide_and_seek;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
@@ -76,6 +77,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.time.Duration;
 import java.util.UUID;
 
 public final class Hide_and_seek extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
@@ -96,6 +98,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private GamePhase phase = GamePhase.IDLE;
     private Location arenaSpawn;
     private BorderState borderState;
+    private int borderParticleTick;
     private int remainingTicks;
 
     @Override
@@ -489,7 +492,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
 
         setupWorldBorder(spawn);
-        Bukkit.broadcast(Component.text("躲猫猫开始！前 30 秒寻找者等待，躲藏者快藏好。"));
+        Bukkit.broadcast(Component.text("躲猫猫开始！前 30 秒寻找者等待，躲藏者快藏好。", NamedTextColor.GOLD));
         gameTask = Bukkit.getScheduler().runTaskTimer(this, this::tickGame, 1L, 1L);
     }
 
@@ -505,12 +508,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (state.role == Role.HIDER) {
             spawnDisguiseDisplay(player, state);
             giveHiderLoadout(player);
-            player.sendTitle("躲藏者", "伪装成方块并坚持到倒计时结束", 10, 60, 10);
+            showTitle(player, Component.text("躲藏者", NamedTextColor.GREEN), Component.text("伪装成方块并坚持到倒计时结束", NamedTextColor.GRAY), 10, 60, 10);
         } else {
             giveSeekerLoadout(player);
             player.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 620, 0, false, false, false));
             player.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 620, 10, false, false, false));
-            player.sendTitle("寻找者", "30 秒后出发，找出所有躲藏者", 10, 60, 10);
+            showTitle(player, Component.text("寻找者", NamedTextColor.RED), Component.text("30 秒后出发，找出所有躲藏者", NamedTextColor.GRAY), 10, 60, 10);
         }
     }
 
@@ -520,7 +523,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         updateBossBar();
 
         if (remainingTicks == settings.seekerReleaseAt()) {
-            Bukkit.broadcast(Component.text("寻找者已释放！"));
+            Bukkit.broadcast(Component.text("寻找者已释放！", NamedTextColor.RED));
             playersWithRole(Role.SEEKER).forEach(player -> {
                 player.removePotionEffect(PotionEffectType.BLINDNESS);
                 player.removePotionEffect(PotionEffectType.SLOWNESS);
@@ -546,7 +549,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (state.role == Role.HIDER) tickDisguise(player, state);
             player.setFoodLevel(20);
             player.setSaturation(20);
-            player.sendActionBar(Component.text(roleName(state.role) + "  HP " + state.hp + "/" + settings.maxHp() + "  MP " + state.mp + "/" + settings.maxMp()));
+            player.sendActionBar(statusLine(state));
         }
     }
 
@@ -610,14 +613,14 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             }
         }
         tickBorderTransition();
-        enforceRectangularBorder();
+        tickRectangularBorder();
     }
 
     private void shrinkBorder(BorderStage stage) {
         if (borderState == null) return;
         BorderRectangle next = prepareNextBorder(stage);
         borderState.beginMove(next, Math.max(1, stage.seconds() * 20L));
-        Bukkit.broadcast(Component.text("世界边界开始缩小，目标范围: " + describeBorder(next)));
+        Bukkit.broadcast(Component.text("世界边界开始缩小。跟随粒子返回安全区。", NamedTextColor.RED));
     }
 
     private void checkWin() {
@@ -631,9 +634,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void endGame(String message) {
-        Bukkit.broadcast(Component.text(message));
+        Component title = Component.text(message, message.contains("躲藏") ? NamedTextColor.GREEN : NamedTextColor.RED);
+        Bukkit.broadcast(title);
         for (Player player : Bukkit.getOnlinePlayers()) {
-            player.sendTitle(message, "", 10, 70, 20);
+            showTitle(player, title, Component.empty(), 10, 70, 20);
             player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1f);
         }
         stopGame(false);
@@ -678,15 +682,16 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         borderState = null;
         phase = GamePhase.IDLE;
         remainingTicks = 0;
-        if (announce) Bukkit.broadcast(Component.text("躲猫猫已停止。"));
+        if (announce) Bukkit.broadcast(Component.text("躲猫猫已停止。", NamedTextColor.YELLOW));
     }
 
     private void setupWorldBorder(Location center) {
         WorldBorder border = center.getWorld().getWorldBorder();
         border.setCenter(center);
-        border.changeSize(Math.max(settings.borderInitialWidth(), settings.borderInitialDepth()), 0L);
+        border.changeSize(settings.borderResetSize(), 0L);
         border.setDamageBuffer(settings.borderDamageBuffer());
         borderState = new BorderState(center.getX(), center.getZ(), settings.borderInitialWidth(), settings.borderInitialDepth());
+        borderParticleTick = 0;
     }
 
     private void spawnDisguiseDisplay(Player player, GamePlayer state) {
@@ -856,7 +861,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             applyDisguiseTransform(state.display, state.lockedYaw);
             state.visualYaw = state.lockedYaw;
         }
-        player.sendMessage(state.rotationLocked ? "已锁定伪装旋转。" : "已解除旋转锁定。");
+        player.sendMessage(Component.text(state.rotationLocked ? "已锁定伪装旋转。" : "已解除旋转锁定。", NamedTextColor.AQUA));
         player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1.3f);
     }
 
@@ -912,7 +917,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.playSound(player.getLocation(), Sound.ENTITY_WARDEN_SONIC_BOOM, 0.6f, 1.4f);
         boolean found = playersWithRole(Role.HIDER).stream()
                 .anyMatch(hider -> hider.getWorld().equals(player.getWorld()) && hider.getLocation().distance(player.getLocation()) <= settings.scanRadius());
-        Bukkit.getScheduler().runTaskLater(this, () -> player.sendMessage(found ? "扫描范围内发现躲藏者。" : "扫描范围内没有发现躲藏者。"), settings.scanResultDelayTicks());
+        Bukkit.getScheduler().runTaskLater(this, () -> player.sendMessage(found
+                ? Component.text("扫描范围内发现躲藏者。", NamedTextColor.RED)
+                : Component.text("扫描范围内没有发现躲藏者。", NamedTextColor.GREEN)), settings.scanResultDelayTicks());
     }
 
     @EventHandler
@@ -1001,8 +1008,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         state.flyLockTicks++;
         boolean oldEnough = state.flyLockTicks >= settings.flyUnlockMinTicks();
         boolean fallbackExpired = state.flyLockTicks >= settings.flyUnlockFallbackTicks();
-        boolean safeMedium = player.isInWaterOrBubbleColumn() || player.isInLava() || player.isClimbing() || player.isInPowderedSnow();
-        if ((oldEnough && (player.isOnGround() || safeMedium)) || fallbackExpired) {
+        boolean safeMedium = player.isInWater() || isInBubbleColumn(player) || player.isInLava() || player.isClimbing() || player.isInPowderedSnow();
+        if ((oldEnough && (((Entity) player).isOnGround() || safeMedium)) || fallbackExpired) {
             state.flyLocked = false;
             state.flyLockTicks = 0;
             player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_HAT, 0.35f, 1.6f);
@@ -1040,6 +1047,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return !feet.getType().isSolid() && !head.getType().isSolid();
     }
 
+    private boolean isInBubbleColumn(Player player) {
+        return player.getLocation().getBlock().getType() == Material.BUBBLE_COLUMN
+                || player.getEyeLocation().getBlock().getType() == Material.BUBBLE_COLUMN;
+    }
+
     private void landDecoyProjectile(Projectile projectile) {
         DecoyProjectile decoyProjectile = decoyProjectiles.remove(projectile.getUniqueId());
         if (decoyProjectile == null) return;
@@ -1073,8 +1085,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.teleport(getArenaSpawn());
         joinScoreboardTeam(player, Role.SEEKER);
         giveSeekerLoadout(player);
-        player.sendTitle("你被发现了", "现在加入寻找者", 10, 60, 10);
-        Bukkit.broadcast(Component.text(player.getName() + " 已转为寻找者。"));
+        showTitle(player, Component.text("你被发现了", NamedTextColor.RED), Component.text("现在加入寻找者", NamedTextColor.GRAY), 10, 60, 10);
+        Bukkit.broadcast(Component.text(player.getName() + " 已转为寻找者。", NamedTextColor.RED));
         checkWin();
     }
 
@@ -1088,7 +1100,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void fail(Player player, String message) {
-        player.sendMessage(message);
+        player.sendMessage(Component.text(message, NamedTextColor.RED));
         player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1f, 0.7f);
     }
 
@@ -1153,7 +1165,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (bossBar != null) bossBar.removePlayer(event.getPlayer());
         cleanupPlayer(event.getPlayer(), state);
         if (phase == GamePhase.RUNNING) {
-            Bukkit.broadcast(Component.text(event.getPlayer().getName() + " 已离开本局躲猫猫。"));
+            Bukkit.broadcast(Component.text(event.getPlayer().getName() + " 已离开本局躲猫猫。", NamedTextColor.YELLOW));
             if (players.isEmpty()) {
                 stopGame(false);
             } else {
@@ -1191,7 +1203,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.removePotionEffect(PotionEffectType.SLOWNESS);
         removeAbilityItems(player.getInventory());
         if (bossBar != null) bossBar.addPlayer(player);
-        player.sendTitle("本局进行中", "你已进入旁观，下一局会自动加入", 10, 70, 20);
+        showTitle(player, Component.text("本局进行中", NamedTextColor.YELLOW), Component.text("你已进入旁观，下一局会自动加入", NamedTextColor.GRAY), 10, 70, 20);
     }
 
     private void cleanupWaitingSpectators() {
@@ -1200,7 +1212,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (player == null) continue;
             player.teleport(getArenaSpawn());
             player.setGameMode(GameMode.ADVENTURE);
-            player.sendMessage("本局躲猫猫已结束，下一局开始时你会加入游戏。");
+            player.sendMessage(Component.text("本局躲猫猫已结束，下一局开始时你会加入游戏。", NamedTextColor.GREEN));
         }
         waitingSpectators.clear();
     }
@@ -1225,6 +1237,27 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private String roleName(Role role) {
         return role == Role.HIDER ? "躲藏者" : "寻找者";
+    }
+
+    private Component statusLine(GamePlayer state) {
+        NamedTextColor roleColor = state.role == Role.HIDER ? NamedTextColor.GREEN : NamedTextColor.RED;
+        return Component.text(roleName(state.role), roleColor)
+                .append(Component.text("  HP ", NamedTextColor.GRAY))
+                .append(Component.text(state.hp + "/" + settings.maxHp(), NamedTextColor.RED))
+                .append(Component.text("  MP ", NamedTextColor.GRAY))
+                .append(Component.text(state.mp + "/" + settings.maxMp(), NamedTextColor.AQUA));
+    }
+
+    private void showTitle(Player player, Component title, Component subtitle, int fadeInTicks, int stayTicks, int fadeOutTicks) {
+        player.showTitle(Title.title(
+                title,
+                subtitle,
+                Title.Times.times(
+                        Duration.ofMillis(fadeInTicks * 50L),
+                        Duration.ofMillis(stayTicks * 50L),
+                        Duration.ofMillis(fadeOutTicks * 50L)
+                )
+        ));
     }
 
     private int abilityCustomModelData(String ability) {
@@ -1289,9 +1322,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void announceNextBorder(BorderStage stage, BorderRectangle next) {
         int seconds = Math.max(0, (remainingTicks - stage.remainingTicks()) / 20);
-        Bukkit.broadcast(Component.text("下一次缩圈将在 " + seconds + " 秒后开始，目标范围: " + describeBorder(next)));
+        Bukkit.broadcast(Component.text("下一次缩圈将在 " + seconds + " 秒后开始，绿色粒子标出了下一安全区。", NamedTextColor.YELLOW));
         for (Player player : Bukkit.getOnlinePlayers()) {
-            player.sendTitle("即将缩圈", describeBorder(next), 10, 70, 20);
+            showTitle(player, Component.text("即将缩圈", NamedTextColor.YELLOW), Component.text("绿色粒子标出了下一安全区", NamedTextColor.GREEN), 10, 70, 20);
             player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.0f);
         }
     }
@@ -1316,27 +1349,87 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (world == null) return;
         WorldBorder border = world.getWorldBorder();
         border.setCenter(rectangle.centerX(), rectangle.centerZ());
-        border.changeSize(Math.max(rectangle.width(), rectangle.depth()), 0L);
+        border.changeSize(settings.borderResetSize(), 0L);
     }
 
-    private void enforceRectangularBorder() {
+    private void tickRectangularBorder() {
         if (borderState == null) return;
         BorderRectangle rectangle = borderState.current();
+        renderBorderParticles(rectangle);
         for (GamePlayer state : players.values()) {
             Player player = Bukkit.getPlayer(state.uuid);
             if (player == null || !player.getWorld().equals(getArenaSpawn().getWorld())) continue;
             Location loc = player.getLocation();
-            double clampedX = Math.max(rectangle.minX() + 0.5, Math.min(rectangle.maxX() - 0.5, loc.getX()));
-            double clampedZ = Math.max(rectangle.minZ() + 0.5, Math.min(rectangle.maxZ() - 0.5, loc.getZ()));
-            if (Math.abs(clampedX - loc.getX()) > 0.01 || Math.abs(clampedZ - loc.getZ()) > 0.01) {
-                Location target = loc.clone();
-                target.setX(clampedX);
-                target.setZ(clampedZ);
-                player.teleport(target);
-                player.playSound(target, Sound.BLOCK_ANVIL_LAND, 0.25f, 1.6f);
-                player.sendActionBar(Component.text("你已到达边界，当前安全范围: " + describeBorder(rectangle)));
+            if (rectangle.contains(loc.getX(), loc.getZ())) {
+                state.borderDamageTicks = 0;
+                continue;
+            }
+
+            state.borderDamageTicks++;
+            if (state.borderDamageTicks >= settings.borderOutsideDamageIntervalTicks()) {
+                state.borderDamageTicks = 0;
+                damageOutsideBorder(player, state);
             }
         }
+    }
+
+    private void damageOutsideBorder(Player player, GamePlayer state) {
+        player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_HURT, 0.55f, 0.8f);
+        player.spawnParticle(Particle.DAMAGE_INDICATOR, player.getLocation().add(0, 1, 0), 6, 0.2, 0.4, 0.2, 0.02);
+        player.sendActionBar(Component.text("你正在安全区外，返回蓝色粒子内。", NamedTextColor.RED));
+        if (state.role == Role.HIDER) {
+            damageHider(player, state, settings.borderOutsideDamage());
+            return;
+        }
+        state.hp = Math.max(0, state.hp - settings.borderOutsideDamage());
+        if (state.hp <= 0) {
+            state.hp = settings.maxHp();
+            state.mp = Math.min(settings.maxMp(), state.mp + settings.borderOutsideDamage());
+            player.teleport(getArenaSpawn());
+            showTitle(player, Component.text("越界倒下", NamedTextColor.RED), Component.text("已返回出生点", NamedTextColor.GRAY), 5, 40, 10);
+        }
+    }
+
+    private void renderBorderParticles(BorderRectangle current) {
+        borderParticleTick++;
+        if (borderParticleTick < settings.borderParticleIntervalTicks()) return;
+        borderParticleTick = 0;
+        BorderRectangle next = nextWarnedBorder();
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (!player.getWorld().equals(getArenaSpawn().getWorld())) continue;
+            renderRectangleFor(player, current, Particle.END_ROD);
+            if (next != null) renderRectangleFor(player, next, Particle.HAPPY_VILLAGER);
+        }
+    }
+
+    private BorderRectangle nextWarnedBorder() {
+        for (BorderStage stage : settings.borderStages()) {
+            if (!startedBorderStages.contains(stage.remainingTicks())) {
+                BorderRectangle pending = pendingBorders.get(stage.remainingTicks());
+                if (pending != null) return pending;
+            }
+        }
+        return null;
+    }
+
+    private void renderRectangleFor(Player player, BorderRectangle rectangle, Particle particle) {
+        double y = player.getLocation().getY() + 1.0;
+        double spacing = Math.max(0.5, settings.borderParticleSpacing());
+        double maxDistanceSquared = settings.borderParticleViewDistance() * settings.borderParticleViewDistance();
+        for (double x = rectangle.minX(); x <= rectangle.maxX(); x += spacing) {
+            spawnBorderParticle(player, particle, x, y, rectangle.minZ(), maxDistanceSquared);
+            spawnBorderParticle(player, particle, x, y, rectangle.maxZ(), maxDistanceSquared);
+        }
+        for (double z = rectangle.minZ(); z <= rectangle.maxZ(); z += spacing) {
+            spawnBorderParticle(player, particle, rectangle.minX(), y, z, maxDistanceSquared);
+            spawnBorderParticle(player, particle, rectangle.maxX(), y, z, maxDistanceSquared);
+        }
+    }
+
+    private void spawnBorderParticle(Player player, Particle particle, double x, double y, double z, double maxDistanceSquared) {
+        Location location = new Location(player.getWorld(), x, y, z);
+        if (location.distanceSquared(player.getLocation()) > maxDistanceSquared) return;
+        player.spawnParticle(particle, location, 1, 0, 0, 0, 0);
     }
 
     private double getMaxHealth(Player player) {
@@ -1416,6 +1509,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 positiveDouble("worldBorder.resetSize"),
                 nonNegativeDouble("worldBorder.damageBuffer"),
                 nonNegativeInt("worldBorder.warningTicks"),
+                positiveInt("worldBorder.outsideDamage"),
+                positiveInt("worldBorder.outsideDamageIntervalTicks"),
+                positiveInt("worldBorder.particleIntervalTicks"),
+                positiveDouble("worldBorder.particleSpacing"),
+                positiveDouble("worldBorder.particleViewDistance"),
                 loadBorderStages()
         );
     }
@@ -1553,6 +1651,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             double borderResetSize,
             double borderDamageBuffer,
             int borderWarningTicks,
+            int borderOutsideDamage,
+            int borderOutsideDamageIntervalTicks,
+            int borderParticleIntervalTicks,
+            double borderParticleSpacing,
+            double borderParticleViewDistance,
             List<BorderStage> borderStages
     ) {
     }
@@ -1583,6 +1686,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private BlockDisplay display;
         private boolean flyLocked;
         private int flyLockTicks;
+        private int borderDamageTicks;
 
         private GamePlayer(UUID uuid, Role role, int hp, int mp) {
             this.uuid = uuid;
@@ -1627,6 +1731,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private record BorderRectangle(double centerX, double centerZ, double width, double depth) {
+        private boolean contains(double x, double z) {
+            return x >= minX() && x <= maxX() && z >= minZ() && z <= maxZ();
+        }
+
         private double minX() {
             return centerX - width / 2.0;
         }

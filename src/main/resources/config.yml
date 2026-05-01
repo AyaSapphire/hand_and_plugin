@@ -83,6 +83,11 @@ worldBorder:
   resetSize: 100000.0
   damageBuffer: 0.0
   warningTicks: 1200
+  outsideDamage: 120
+  outsideDamageIntervalTicks: 20
+  particleIntervalTicks: 10
+  particleSpacing: 1.5
+  particleViewDistance: 80.0
   stages:
     - remainingTicks: 10800
       width: 90.0
