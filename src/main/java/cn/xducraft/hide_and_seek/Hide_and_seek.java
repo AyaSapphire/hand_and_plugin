@@ -4,6 +4,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
+import org.bukkit.Color;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -27,6 +28,7 @@ import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.BlockDisplay;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
 import org.bukkit.entity.Snowball;
@@ -84,6 +86,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private final Map<UUID, GamePlayer> players = new HashMap<>();
     private final List<Decoy> decoys = new ArrayList<>();
     private final Map<UUID, DecoyProjectile> decoyProjectiles = new HashMap<>();
+    private final Map<UUID, UUID> attackBulletVisuals = new HashMap<>();
     private final Set<UUID> waitingSpectators = new HashSet<>();
     private final Map<Integer, BorderRectangle> pendingBorders = new HashMap<>();
     private final Set<Integer> warnedBorderStages = new HashSet<>();
@@ -485,7 +488,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         for (int i = 0; i < online.size(); i++) {
             Player player = online.get(i);
             Role role = i < seekerCount ? Role.SEEKER : Role.HIDER;
-            GamePlayer state = new GamePlayer(player.getUniqueId(), role, settings.maxHp(), settings.maxMp());
+            GamePlayer state = new GamePlayer(player.getUniqueId(), role, settings.maxHp(), settings.maxMp(), settings.maxAir());
             players.put(player.getUniqueId(), state);
             setupPlayer(player, state, spawn);
             bossBar.addPlayer(player);
@@ -535,6 +538,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         tickPlayers();
         tickDecoys();
         tickDecoyProjectiles();
+        tickAttackBulletVisuals();
         checkWin();
     }
 
@@ -545,6 +549,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             state.hp = Math.min(settings.maxHp(), state.hp + settings.hpRegenPerTick());
             state.mp = Math.min(settings.maxMp(), state.mp + settings.mpRegenPerTick());
             tickFlyLock(player, state);
+            tickAir(player, state);
             ensureLoadout(player, state.role);
             if (state.role == Role.HIDER) tickDisguise(player, state);
             player.setFoodLevel(20);
@@ -669,9 +674,14 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             Entity projectile = Bukkit.getEntity(projectileId);
             if (projectile != null) projectile.remove();
         }
+        for (UUID visualId : attackBulletVisuals.values()) {
+            Entity visual = Bukkit.getEntity(visualId);
+            if (visual != null) visual.remove();
+        }
 
         decoys.clear();
         decoyProjectiles.clear();
+        attackBulletVisuals.clear();
         pendingBorders.clear();
         warnedBorderStages.clear();
         startedBorderStages.clear();
@@ -907,6 +917,21 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         Snowball snowball = player.launchProjectile(Snowball.class);
         snowball.setVelocity(player.getEyeLocation().getDirection().normalize().multiply(settings.attackBulletSpeed()));
         snowball.getPersistentDataContainer().set(attackKey, PersistentDataType.BYTE, (byte) 1);
+        ItemDisplay visual = player.getWorld().spawn(snowball.getLocation(), ItemDisplay.class, display -> {
+            display.setItemStack(new ItemStack(Material.NETHERITE_BLOCK));
+            display.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.GROUND);
+            display.setPersistent(false);
+            display.setTeleportDuration(1);
+            display.setViewRange(64f);
+            display.setTransformation(new Transformation(
+                    new Vector3f(0f, -0.15f, 0f),
+                    new Quaternionf(),
+                    new Vector3f(0.45f, 0.45f, 0.45f),
+                    new Quaternionf()
+            ));
+        });
+        snowball.addPassenger(visual);
+        attackBulletVisuals.put(snowball.getUniqueId(), visual.getUniqueId());
         player.playSound(player.getLocation(), Sound.ENTITY_SNOWBALL_THROW, 1f, 1.4f);
     }
 
@@ -940,6 +965,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
         damageNearbyDecoy(projectile.getLocation(), settings.damagePerHit());
         projectile.getWorld().spawnParticle(Particle.CRIT, projectile.getLocation(), 16, 0.2, 0.2, 0.2, 0.05);
+        removeAttackBulletVisual(projectile);
         projectile.remove();
     }
 
@@ -949,9 +975,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         GamePlayer state = players.get(player.getUniqueId());
         if (state == null) return;
         event.setCancelled(true);
-        if (state.role == Role.HIDER && !(event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Snowball)) {
-            damageHider(player, state, settings.damagePerHit());
+        if (event instanceof EntityDamageByEntityEvent byEntity
+                && byEntity.getDamager() instanceof Snowball snowball
+                && snowball.getPersistentDataContainer().has(attackKey, PersistentDataType.BYTE)) {
+            return;
         }
+        damagePlayer(player, state, customDamageFromVanilla(event));
     }
 
     @EventHandler
@@ -966,6 +995,26 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void damageIfHider(Player player) {
         GamePlayer target = players.get(player.getUniqueId());
         if (target != null && target.role == Role.HIDER) damageHider(player, target, settings.damagePerHit());
+    }
+
+    private int customDamageFromVanilla(EntityDamageEvent event) {
+        return Math.max(settings.minVanillaDamage(), (int) Math.ceil(event.getFinalDamage() * settings.vanillaDamageScale()));
+    }
+
+    private void damagePlayer(Player player, GamePlayer state, int damage) {
+        if (state.role == Role.HIDER) {
+            damageHider(player, state, damage);
+            return;
+        }
+        state.hp = Math.max(0, state.hp - damage);
+        player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_HURT, 0.75f, 0.9f);
+        player.getWorld().spawnParticle(Particle.DAMAGE_INDICATOR, player.getLocation().add(0, 1, 0), 8, 0.25, 0.45, 0.25, 0.02);
+        if (state.hp <= 0) {
+            state.hp = settings.maxHp();
+            state.mp = Math.max(0, state.mp / 2);
+            player.teleport(getArenaSpawn());
+            showTitle(player, Component.text("倒下了", NamedTextColor.RED), Component.text("已返回出生点", NamedTextColor.GRAY), 5, 40, 10);
+        }
     }
 
     private void damageHider(Player player, GamePlayer state, int damage) {
@@ -1003,6 +1052,26 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
     }
 
+    private void tickAttackBulletVisuals() {
+        Iterator<Map.Entry<UUID, UUID>> iterator = attackBulletVisuals.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<UUID, UUID> entry = iterator.next();
+            Entity projectile = Bukkit.getEntity(entry.getKey());
+            Entity visual = Bukkit.getEntity(entry.getValue());
+            if (projectile == null || projectile.isDead()) {
+                if (visual != null) visual.remove();
+                iterator.remove();
+            }
+        }
+    }
+
+    private void removeAttackBulletVisual(Projectile projectile) {
+        UUID visualId = attackBulletVisuals.remove(projectile.getUniqueId());
+        if (visualId == null) return;
+        Entity visual = Bukkit.getEntity(visualId);
+        if (visual != null) visual.remove();
+    }
+
     private void tickFlyLock(Player player, GamePlayer state) {
         if (!state.flyLocked) return;
         state.flyLockTicks++;
@@ -1014,6 +1083,32 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             state.flyLockTicks = 0;
             player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_HAT, 0.35f, 1.6f);
         }
+    }
+
+    private void tickAir(Player player, GamePlayer state) {
+        if (player.isUnderWater()) {
+            state.air = Math.max(0, state.air - settings.airDrainPerTick());
+            updateVanillaAirBar(player, state.air);
+            if (state.air <= 0) {
+                state.airDamageTicks++;
+                if (state.airDamageTicks >= settings.airDamageIntervalTicks()) {
+                    state.airDamageTicks = 0;
+                    player.spawnParticle(Particle.BUBBLE_POP, player.getLocation().add(0, 1, 0), 8, 0.25, 0.35, 0.25, 0.02);
+                    damagePlayer(player, state, settings.airDamage());
+                }
+            }
+            return;
+        }
+
+        state.air = Math.min(settings.maxAir(), state.air + settings.airRegenPerTick());
+        state.airDamageTicks = 0;
+        updateVanillaAirBar(player, state.air);
+    }
+
+    private void updateVanillaAirBar(Player player, int customAir) {
+        int maximumAir = Math.max(1, player.getMaximumAir());
+        int displayedAir = (int) Math.round(maximumAir * (customAir / (double) settings.maxAir()));
+        player.setRemainingAir(Math.max(0, Math.min(maximumAir, displayedAir)));
     }
 
     private void tickDecoyMovement(Decoy decoy) {
@@ -1245,7 +1340,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 .append(Component.text("  HP ", NamedTextColor.GRAY))
                 .append(Component.text(state.hp + "/" + settings.maxHp(), NamedTextColor.RED))
                 .append(Component.text("  MP ", NamedTextColor.GRAY))
-                .append(Component.text(state.mp + "/" + settings.maxMp(), NamedTextColor.AQUA));
+                .append(Component.text(state.mp + "/" + settings.maxMp(), NamedTextColor.AQUA))
+                .append(Component.text("  AIR ", NamedTextColor.GRAY))
+                .append(Component.text(state.air + "/" + settings.maxAir(), state.air <= settings.maxAir() / 3 ? NamedTextColor.RED : NamedTextColor.BLUE));
     }
 
     private void showTitle(Player player, Component title, Component subtitle, int fadeInTicks, int stayTicks, int fadeOutTicks) {
@@ -1376,18 +1473,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void damageOutsideBorder(Player player, GamePlayer state) {
         player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_HURT, 0.55f, 0.8f);
         player.spawnParticle(Particle.DAMAGE_INDICATOR, player.getLocation().add(0, 1, 0), 6, 0.2, 0.4, 0.2, 0.02);
-        player.sendActionBar(Component.text("你正在安全区外，返回蓝色粒子内。", NamedTextColor.RED));
+        player.sendActionBar(Component.text("你正在安全区外，返回红色粒子内。", NamedTextColor.RED));
         if (state.role == Role.HIDER) {
             damageHider(player, state, settings.borderOutsideDamage());
             return;
         }
-        state.hp = Math.max(0, state.hp - settings.borderOutsideDamage());
-        if (state.hp <= 0) {
-            state.hp = settings.maxHp();
-            state.mp = Math.min(settings.maxMp(), state.mp + settings.borderOutsideDamage());
-            player.teleport(getArenaSpawn());
-            showTitle(player, Component.text("越界倒下", NamedTextColor.RED), Component.text("已返回出生点", NamedTextColor.GRAY), 5, 40, 10);
-        }
+        damagePlayer(player, state, settings.borderOutsideDamage());
     }
 
     private void renderBorderParticles(BorderRectangle current) {
@@ -1397,8 +1488,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         BorderRectangle next = nextWarnedBorder();
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (!player.getWorld().equals(getArenaSpawn().getWorld())) continue;
-            renderRectangleFor(player, current, Particle.END_ROD);
-            if (next != null) renderRectangleFor(player, next, Particle.HAPPY_VILLAGER);
+            renderRectangleFor(player, current, new Particle.DustOptions(Color.RED, 1.7f));
+            if (next != null) renderRectangleFor(player, next, new Particle.DustOptions(Color.LIME, 1.35f));
         }
     }
 
@@ -1412,24 +1503,27 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return null;
     }
 
-    private void renderRectangleFor(Player player, BorderRectangle rectangle, Particle particle) {
-        double y = player.getLocation().getY() + 1.0;
+    private void renderRectangleFor(Player player, BorderRectangle rectangle, Particle.DustOptions dust) {
         double spacing = Math.max(0.5, settings.borderParticleSpacing());
         double maxDistanceSquared = settings.borderParticleViewDistance() * settings.borderParticleViewDistance();
-        for (double x = rectangle.minX(); x <= rectangle.maxX(); x += spacing) {
-            spawnBorderParticle(player, particle, x, y, rectangle.minZ(), maxDistanceSquared);
-            spawnBorderParticle(player, particle, x, y, rectangle.maxZ(), maxDistanceSquared);
-        }
-        for (double z = rectangle.minZ(); z <= rectangle.maxZ(); z += spacing) {
-            spawnBorderParticle(player, particle, rectangle.minX(), y, z, maxDistanceSquared);
-            spawnBorderParticle(player, particle, rectangle.maxX(), y, z, maxDistanceSquared);
+        double centerY = player.getLocation().getY() + 1.0;
+        for (int yOffset = -settings.borderParticleVerticalHalfRange(); yOffset <= settings.borderParticleVerticalHalfRange(); yOffset++) {
+            double y = centerY + yOffset;
+            for (double x = rectangle.minX(); x <= rectangle.maxX(); x += spacing) {
+                spawnBorderParticle(player, x, y, rectangle.minZ(), maxDistanceSquared, dust);
+                spawnBorderParticle(player, x, y, rectangle.maxZ(), maxDistanceSquared, dust);
+            }
+            for (double z = rectangle.minZ(); z <= rectangle.maxZ(); z += spacing) {
+                spawnBorderParticle(player, rectangle.minX(), y, z, maxDistanceSquared, dust);
+                spawnBorderParticle(player, rectangle.maxX(), y, z, maxDistanceSquared, dust);
+            }
         }
     }
 
-    private void spawnBorderParticle(Player player, Particle particle, double x, double y, double z, double maxDistanceSquared) {
+    private void spawnBorderParticle(Player player, double x, double y, double z, double maxDistanceSquared, Particle.DustOptions dust) {
         Location location = new Location(player.getWorld(), x, y, z);
         if (location.distanceSquared(player.getLocation()) > maxDistanceSquared) return;
-        player.spawnParticle(particle, location, 1, 0, 0, 0, 0);
+        player.spawnParticle(Particle.DUST, location, 1, 0, 0, 0, 0, dust);
     }
 
     private double getMaxHealth(Player player) {
@@ -1475,9 +1569,16 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 Math.max(0, durationTicks - seekerReleaseDelayTicks),
                 positiveInt("player.hp"),
                 positiveInt("player.mp"),
+                positiveInt("player.air"),
                 nonNegativeInt("player.hpRegenPerTick"),
                 nonNegativeInt("player.mpRegenPerTick"),
                 positiveInt("player.damagePerHit"),
+                positiveDouble("player.vanillaDamageScale"),
+                positiveInt("player.minVanillaDamage"),
+                positiveInt("player.airDrainPerTick"),
+                positiveInt("player.airRegenPerTick"),
+                positiveInt("player.airDamage"),
+                positiveInt("player.airDamageIntervalTicks"),
                 positiveInt("abilities.disguise.range"),
                 clampedDouble("abilities.disguise.rotationSnapDegrees", 0.0, 360.0),
                 loadDisguiseBlacklist(),
@@ -1514,6 +1615,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 positiveInt("worldBorder.particleIntervalTicks"),
                 positiveDouble("worldBorder.particleSpacing"),
                 positiveDouble("worldBorder.particleViewDistance"),
+                nonNegativeInt("worldBorder.particleVerticalHalfRange"),
                 loadBorderStages()
         );
     }
@@ -1617,9 +1719,16 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             int seekerReleaseAt,
             int maxHp,
             int maxMp,
+            int maxAir,
             int hpRegenPerTick,
             int mpRegenPerTick,
             int damagePerHit,
+            double vanillaDamageScale,
+            int minVanillaDamage,
+            int airDrainPerTick,
+            int airRegenPerTick,
+            int airDamage,
+            int airDamageIntervalTicks,
             int disguiseRange,
             double disguiseRotationSnapDegrees,
             Set<Material> disguiseBlacklist,
@@ -1656,6 +1765,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             int borderParticleIntervalTicks,
             double borderParticleSpacing,
             double borderParticleViewDistance,
+            int borderParticleVerticalHalfRange,
             List<BorderStage> borderStages
     ) {
     }
@@ -1678,6 +1788,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private Role role;
         private int hp;
         private int mp;
+        private int air;
+        private int airDamageTicks;
         private boolean disguised;
         private boolean rotationLocked;
         private float lockedYaw;
@@ -1688,11 +1800,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private int flyLockTicks;
         private int borderDamageTicks;
 
-        private GamePlayer(UUID uuid, Role role, int hp, int mp) {
+        private GamePlayer(UUID uuid, Role role, int hp, int mp, int air) {
             this.uuid = uuid;
             this.role = role;
             this.hp = hp;
             this.mp = mp;
+            this.air = air;
             this.disguiseData = Bukkit.createBlockData(Material.AIR);
         }
     }
