@@ -50,6 +50,8 @@ abilities:
     hp: 100
     mp: 1200
     lifetimeTicks: 600
+    throwSpeed: 1.15
+    maxFlightTicks: 80
   flyHider:
     mp: 1600
     power: 1.85
