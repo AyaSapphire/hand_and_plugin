@@ -75,12 +75,17 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.UUID;
 
 public final class Hide_and_seek extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
     private final Map<UUID, GamePlayer> players = new HashMap<>();
     private final List<Decoy> decoys = new ArrayList<>();
     private final Map<UUID, DecoyProjectile> decoyProjectiles = new HashMap<>();
+    private final Set<UUID> waitingSpectators = new HashSet<>();
+    private final Map<Integer, BorderRectangle> pendingBorders = new HashMap<>();
+    private final Set<Integer> warnedBorderStages = new HashSet<>();
+    private final Set<Integer> startedBorderStages = new HashSet<>();
     private NamespacedKey abilityKey;
     private NamespacedKey noDropKey;
     private NamespacedKey attackKey;
@@ -90,6 +95,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private BossBar bossBar;
     private GamePhase phase = GamePhase.IDLE;
     private Location arenaSpawn;
+    private BorderState borderState;
     private int remainingTicks;
 
     @Override
@@ -535,6 +541,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (player == null) continue;
             state.hp = Math.min(settings.maxHp(), state.hp + settings.hpRegenPerTick());
             state.mp = Math.min(settings.maxMp(), state.mp + settings.mpRegenPerTick());
+            tickFlyLock(player, state);
             ensureLoadout(player, state.role);
             if (state.role == Role.HIDER) tickDisguise(player, state);
             player.setFoodLevel(20);
@@ -574,7 +581,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (decoy.remainingTicks <= 0 || decoy.hp <= 0 || decoy.display == null || decoy.display.isDead()) {
                 if (decoy.display != null) decoy.display.remove();
                 iterator.remove();
+                continue;
             }
+            tickDecoyMovement(decoy);
         }
     }
 
@@ -587,14 +596,28 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void updateBorder() {
         for (BorderStage stage : settings.borderStages()) {
-            if (remainingTicks == stage.remainingTicks()) shrinkBorder(stage.size(), stage.seconds());
+            int warnAt = stage.remainingTicks() + settings.borderWarningTicks();
+            if (!warnedBorderStages.contains(stage.remainingTicks())
+                    && remainingTicks <= warnAt
+                    && remainingTicks > stage.remainingTicks()) {
+                BorderRectangle next = prepareNextBorder(stage);
+                warnedBorderStages.add(stage.remainingTicks());
+                announceNextBorder(stage, next);
+            }
+            if (!startedBorderStages.contains(stage.remainingTicks()) && remainingTicks <= stage.remainingTicks()) {
+                startedBorderStages.add(stage.remainingTicks());
+                shrinkBorder(stage);
+            }
         }
+        tickBorderTransition();
+        enforceRectangularBorder();
     }
 
-    private void shrinkBorder(double size, long seconds) {
-        WorldBorder border = getArenaSpawn().getWorld().getWorldBorder();
-        border.changeSize(size, seconds * 20L);
-        Bukkit.broadcast(Component.text("世界边界正在缩小。"));
+    private void shrinkBorder(BorderStage stage) {
+        if (borderState == null) return;
+        BorderRectangle next = prepareNextBorder(stage);
+        borderState.beginMove(next, Math.max(1, stage.seconds() * 20L));
+        Bukkit.broadcast(Component.text("世界边界开始缩小，目标范围: " + describeBorder(next)));
     }
 
     private void checkWin() {
@@ -645,9 +668,14 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
         decoys.clear();
         decoyProjectiles.clear();
+        pendingBorders.clear();
+        warnedBorderStages.clear();
+        startedBorderStages.clear();
         players.clear();
+        cleanupWaitingSpectators();
         World world = getArenaSpawn().getWorld();
-        if (world != null) world.getWorldBorder().setSize(settings.borderResetSize());
+        if (world != null) world.getWorldBorder().changeSize(settings.borderResetSize(), 0L);
+        borderState = null;
         phase = GamePhase.IDLE;
         remainingTicks = 0;
         if (announce) Bukkit.broadcast(Component.text("躲猫猫已停止。"));
@@ -656,8 +684,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void setupWorldBorder(Location center) {
         WorldBorder border = center.getWorld().getWorldBorder();
         border.setCenter(center);
-        border.setSize(settings.borderInitialSize());
+        border.changeSize(Math.max(settings.borderInitialWidth(), settings.borderInitialDepth()), 0L);
         border.setDamageBuffer(settings.borderDamageBuffer());
+        borderState = new BorderState(center.getX(), center.getZ(), settings.borderInitialWidth(), settings.borderInitialDepth());
     }
 
     private void spawnDisguiseDisplay(Player player, GamePlayer state) {
@@ -822,7 +851,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void toggleRotationLock(Player player, GamePlayer state) {
         if (state.role != Role.HIDER) return;
         state.rotationLocked = !state.rotationLocked;
-        state.lockedYaw = normalizeYaw(player.getLocation().getYaw());
+        state.lockedYaw = snapYaw(player.getLocation().getYaw());
         if (state.display != null) {
             applyDisguiseTransform(state.display, state.lockedYaw);
             state.visualYaw = state.lockedYaw;
@@ -852,11 +881,17 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void useFly(Player player, GamePlayer state, Role requiredRole, int cost, double power, double minYBoost) {
         if (state.role != requiredRole) return;
+        if (state.flyLocked) {
+            fail(player, "跳跃尚未恢复。落地或进入水中后才能再次使用。");
+            return;
+        }
         if (!consumeMp(player, state, cost)) return;
         if (requiredRole == Role.HIDER) releaseDisguise(player, state);
         Vector velocity = player.getEyeLocation().getDirection().normalize().multiply(power);
         velocity.setY(Math.max(velocity.getY(), minYBoost));
         player.setVelocity(velocity);
+        state.flyLocked = true;
+        state.flyLockTicks = 0;
         player.getWorld().spawnParticle(Particle.CLOUD, player.getLocation(), 18, 0.25, 0.15, 0.25, 0.02);
         player.playSound(player.getLocation(), Sound.ENTITY_BREEZE_JUMP, 1f, 1f);
     }
@@ -961,6 +996,50 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
     }
 
+    private void tickFlyLock(Player player, GamePlayer state) {
+        if (!state.flyLocked) return;
+        state.flyLockTicks++;
+        boolean oldEnough = state.flyLockTicks >= settings.flyUnlockMinTicks();
+        boolean fallbackExpired = state.flyLockTicks >= settings.flyUnlockFallbackTicks();
+        boolean safeMedium = player.isInWaterOrBubbleColumn() || player.isInLava() || player.isClimbing() || player.isInPowderedSnow();
+        if ((oldEnough && (player.isOnGround() || safeMedium)) || fallbackExpired) {
+            state.flyLocked = false;
+            state.flyLockTicks = 0;
+            player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_HAT, 0.35f, 1.6f);
+        }
+    }
+
+    private void tickDecoyMovement(Decoy decoy) {
+        if (decoy.display == null) return;
+        if (decoy.moveTicksRemaining > 0) {
+            Location loc = decoy.display.getLocation();
+            Location next = loc.clone().add(decoy.moveDirection);
+            if (canMoveDecoyTo(next)) {
+                decoy.display.teleport(next);
+                applyDisguiseTransform(decoy.display, decoy.yaw);
+            } else {
+                decoy.moveTicksRemaining = 0;
+                decoy.nextMoveTicks = settings.decoyMoveIntervalTicks();
+            }
+            decoy.moveTicksRemaining--;
+            return;
+        }
+
+        decoy.nextMoveTicks--;
+        if (decoy.nextMoveTicks > 0) return;
+        double radians = ThreadLocalRandom.current().nextDouble(Math.PI * 2.0);
+        decoy.moveDirection = new Vector(Math.cos(radians), 0.0, Math.sin(radians)).multiply(settings.decoyMoveSpeed());
+        decoy.yaw = normalizeYaw((float) Math.toDegrees(Math.atan2(-decoy.moveDirection.getX(), decoy.moveDirection.getZ())));
+        decoy.moveTicksRemaining = settings.decoyMoveDurationTicks();
+        decoy.nextMoveTicks = settings.decoyMoveIntervalTicks();
+    }
+
+    private boolean canMoveDecoyTo(Location location) {
+        Block feet = location.getBlock();
+        Block head = location.clone().add(0, 1, 0).getBlock();
+        return !feet.getType().isSolid() && !head.getType().isSolid();
+    }
+
     private void landDecoyProjectile(Projectile projectile) {
         DecoyProjectile decoyProjectile = decoyProjectiles.remove(projectile.getUniqueId());
         if (decoyProjectile == null) return;
@@ -977,7 +1056,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             spawned.setPersistent(false);
             applyDisguiseTransform(spawned, decoyProjectile.yaw);
         });
-        decoys.add(new Decoy(decoyProjectile.owner, display, settings.decoyHp(), settings.decoyLifetimeTicks()));
+        decoys.add(new Decoy(decoyProjectile.owner, display, settings.decoyHp(), settings.decoyLifetimeTicks(), decoyProjectile.yaw, settings.decoyMoveDelayTicks()));
         loc.getWorld().spawnParticle(Particle.BLOCK, loc.clone().add(0, 0.5, 0), 18, 0.25, 0.25, 0.25, decoyProjectile.blockData);
         loc.getWorld().playSound(loc, Sound.BLOCK_STONE_PLACE, 0.8f, 1.1f);
     }
@@ -1058,11 +1137,17 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (bossBar != null && state != null) {
             bossBar.addPlayer(event.getPlayer());
             ensureLoadout(event.getPlayer(), state.role);
+        } else if (phase == GamePhase.RUNNING) {
+            setupWaitingSpectator(event.getPlayer());
         }
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        if (waitingSpectators.remove(event.getPlayer().getUniqueId())) {
+            if (bossBar != null) bossBar.removePlayer(event.getPlayer());
+            return;
+        }
         GamePlayer state = players.remove(event.getPlayer().getUniqueId());
         if (state == null) return;
         if (bossBar != null) bossBar.removePlayer(event.getPlayer());
@@ -1095,6 +1180,29 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (getAbility(inventory.getItem(i)) != null) inventory.setItem(i, null);
         }
         if (getAbility(inventory.getItemInOffHand()) != null) inventory.setItemInOffHand(null);
+    }
+
+    private void setupWaitingSpectator(Player player) {
+        waitingSpectators.add(player.getUniqueId());
+        player.teleport(getArenaSpawn());
+        player.setGameMode(GameMode.SPECTATOR);
+        player.removePotionEffect(PotionEffectType.INVISIBILITY);
+        player.removePotionEffect(PotionEffectType.BLINDNESS);
+        player.removePotionEffect(PotionEffectType.SLOWNESS);
+        removeAbilityItems(player.getInventory());
+        if (bossBar != null) bossBar.addPlayer(player);
+        player.sendTitle("本局进行中", "你已进入旁观，下一局会自动加入", 10, 70, 20);
+    }
+
+    private void cleanupWaitingSpectators() {
+        for (UUID uuid : waitingSpectators) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player == null) continue;
+            player.teleport(getArenaSpawn());
+            player.setGameMode(GameMode.ADVENTURE);
+            player.sendMessage("本局躲猫猫已结束，下一局开始时你会加入游戏。");
+        }
+        waitingSpectators.clear();
     }
 
     private String getAbility(ItemStack item) {
@@ -1161,6 +1269,76 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (seekerTeam != null) seekerTeam.removeEntry(player.getName());
     }
 
+    private BorderRectangle prepareNextBorder(BorderStage stage) {
+        return pendingBorders.computeIfAbsent(stage.remainingTicks(), ignored -> {
+            BorderRectangle current = borderState == null
+                    ? new BorderRectangle(getArenaSpawn().getX(), getArenaSpawn().getZ(), settings.borderInitialWidth(), settings.borderInitialDepth())
+                    : borderState.current();
+            double halfXRange = Math.max(0.0, (current.width() - stage.width()) / 2.0);
+            double halfZRange = Math.max(0.0, (current.depth() - stage.depth()) / 2.0);
+            double centerX = randomBetween(current.centerX() - halfXRange, current.centerX() + halfXRange);
+            double centerZ = randomBetween(current.centerZ() - halfZRange, current.centerZ() + halfZRange);
+            return new BorderRectangle(centerX, centerZ, stage.width(), stage.depth());
+        });
+    }
+
+    private double randomBetween(double min, double max) {
+        if (max <= min) return min;
+        return ThreadLocalRandom.current().nextDouble(min, max);
+    }
+
+    private void announceNextBorder(BorderStage stage, BorderRectangle next) {
+        int seconds = Math.max(0, (remainingTicks - stage.remainingTicks()) / 20);
+        Bukkit.broadcast(Component.text("下一次缩圈将在 " + seconds + " 秒后开始，目标范围: " + describeBorder(next)));
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            player.sendTitle("即将缩圈", describeBorder(next), 10, 70, 20);
+            player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.0f);
+        }
+    }
+
+    private String describeBorder(BorderRectangle border) {
+        return "X " + formatOneDecimal(border.minX()) + " 到 " + formatOneDecimal(border.maxX())
+                + ", Z " + formatOneDecimal(border.minZ()) + " 到 " + formatOneDecimal(border.maxZ());
+    }
+
+    private String formatOneDecimal(double value) {
+        return String.format(Locale.ROOT, "%.1f", value);
+    }
+
+    private void tickBorderTransition() {
+        if (borderState == null) return;
+        borderState.tick();
+        applyVanillaBorder(borderState.current());
+    }
+
+    private void applyVanillaBorder(BorderRectangle rectangle) {
+        World world = getArenaSpawn().getWorld();
+        if (world == null) return;
+        WorldBorder border = world.getWorldBorder();
+        border.setCenter(rectangle.centerX(), rectangle.centerZ());
+        border.changeSize(Math.max(rectangle.width(), rectangle.depth()), 0L);
+    }
+
+    private void enforceRectangularBorder() {
+        if (borderState == null) return;
+        BorderRectangle rectangle = borderState.current();
+        for (GamePlayer state : players.values()) {
+            Player player = Bukkit.getPlayer(state.uuid);
+            if (player == null || !player.getWorld().equals(getArenaSpawn().getWorld())) continue;
+            Location loc = player.getLocation();
+            double clampedX = Math.max(rectangle.minX() + 0.5, Math.min(rectangle.maxX() - 0.5, loc.getX()));
+            double clampedZ = Math.max(rectangle.minZ() + 0.5, Math.min(rectangle.maxZ() - 0.5, loc.getZ()));
+            if (Math.abs(clampedX - loc.getX()) > 0.01 || Math.abs(clampedZ - loc.getZ()) > 0.01) {
+                Location target = loc.clone();
+                target.setX(clampedX);
+                target.setZ(clampedZ);
+                player.teleport(target);
+                player.playSound(target, Sound.BLOCK_ANVIL_LAND, 0.25f, 1.6f);
+                player.sendActionBar(Component.text("你已到达边界，当前安全范围: " + describeBorder(rectangle)));
+            }
+        }
+    }
+
     private double getMaxHealth(Player player) {
         return Objects.requireNonNull(player.getAttribute(Attribute.MAX_HEALTH)).getValue();
     }
@@ -1215,21 +1393,29 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 positiveInt("abilities.decoy.lifetimeTicks"),
                 positiveDouble("abilities.decoy.throwSpeed"),
                 positiveInt("abilities.decoy.maxFlightTicks"),
+                nonNegativeInt("abilities.decoy.moveDelayTicks"),
+                positiveInt("abilities.decoy.moveIntervalTicks"),
+                positiveInt("abilities.decoy.moveDurationTicks"),
+                nonNegativeDouble("abilities.decoy.moveSpeed"),
                 nonNegativeInt("abilities.flyHider.mp"),
                 positiveDouble("abilities.flyHider.power"),
                 nonNegativeDouble("abilities.flyHider.minYBoost"),
                 nonNegativeInt("abilities.flySeeker.mp"),
                 positiveDouble("abilities.flySeeker.power"),
                 nonNegativeDouble("abilities.flySeeker.minYBoost"),
+                positiveInt("abilities.fly.unlockMinTicks"),
+                positiveInt("abilities.fly.unlockFallbackTicks"),
                 nonNegativeInt("abilities.attackBullet.mp"),
                 positiveDouble("abilities.attackBullet.speed"),
                 positiveDouble("abilities.attackBullet.hitRadius"),
                 nonNegativeInt("abilities.scan.mp"),
                 positiveDouble("abilities.scan.radius"),
                 nonNegativeLong("abilities.scan.resultDelayTicks"),
-                positiveDouble("worldBorder.initialSize"),
+                positiveDoubleWithFallback("worldBorder.initialWidth", "worldBorder.initialSize"),
+                positiveDoubleWithFallback("worldBorder.initialDepth", "worldBorder.initialSize"),
                 positiveDouble("worldBorder.resetSize"),
                 nonNegativeDouble("worldBorder.damageBuffer"),
+                nonNegativeInt("worldBorder.warningTicks"),
                 loadBorderStages()
         );
     }
@@ -1239,10 +1425,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         for (Map<?, ?> map : getConfig().getMapList("worldBorder.stages")) {
             Object remainingTicks = map.get("remainingTicks");
             Object size = map.get("size");
+            Object width = map.get("width");
+            Object depth = map.get("depth");
             Object seconds = map.get("seconds");
-            if (remainingTicks instanceof Number tickNumber && size instanceof Number sizeNumber) {
+            if (remainingTicks instanceof Number tickNumber) {
+                double fallbackSize = size instanceof Number sizeNumber ? sizeNumber.doubleValue() : 1.0;
+                double widthValue = width instanceof Number widthNumber ? widthNumber.doubleValue() : fallbackSize;
+                double depthValue = depth instanceof Number depthNumber ? depthNumber.doubleValue() : fallbackSize;
                 long secondsValue = seconds instanceof Number secondsNumber ? Math.max(0L, secondsNumber.longValue()) : 3L;
-                stages.add(new BorderStage(Math.max(0, tickNumber.intValue()), Math.max(1.0, sizeNumber.doubleValue()), secondsValue));
+                stages.add(new BorderStage(Math.max(0, tickNumber.intValue()), Math.max(1.0, widthValue), Math.max(1.0, depthValue), secondsValue));
             }
         }
         stages.sort(Comparator.comparingInt(BorderStage::remainingTicks).reversed());
@@ -1313,6 +1504,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return Math.max(0.001, getConfig().getDouble(path));
     }
 
+    private double positiveDoubleWithFallback(String path, String fallbackPath) {
+        if (getConfig().contains(path)) return positiveDouble(path);
+        return positiveDouble(fallbackPath);
+    }
+
     private double nonNegativeDouble(String path) {
         return Math.max(0.0, getConfig().getDouble(path));
     }
@@ -1334,26 +1530,34 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             int decoyLifetimeTicks,
             double decoyThrowSpeed,
             int decoyMaxFlightTicks,
+            int decoyMoveDelayTicks,
+            int decoyMoveIntervalTicks,
+            int decoyMoveDurationTicks,
+            double decoyMoveSpeed,
             int hiderFlyMp,
             double hiderFlyPower,
             double hiderFlyMinYBoost,
             int seekerFlyMp,
             double seekerFlyPower,
             double seekerFlyMinYBoost,
+            int flyUnlockMinTicks,
+            int flyUnlockFallbackTicks,
             int attackBulletMp,
             double attackBulletSpeed,
             double attackBulletHitRadius,
             int scanMp,
             double scanRadius,
             long scanResultDelayTicks,
-            double borderInitialSize,
+            double borderInitialWidth,
+            double borderInitialDepth,
             double borderResetSize,
             double borderDamageBuffer,
+            int borderWarningTicks,
             List<BorderStage> borderStages
     ) {
     }
 
-    private record BorderStage(int remainingTicks, double size, long seconds) {
+    private record BorderStage(int remainingTicks, double width, double depth, long seconds) {
     }
 
     private enum GamePhase {
@@ -1377,6 +1581,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private float visualYaw;
         private BlockData disguiseData;
         private BlockDisplay display;
+        private boolean flyLocked;
+        private int flyLockTicks;
 
         private GamePlayer(UUID uuid, Role role, int hp, int mp) {
             this.uuid = uuid;
@@ -1392,12 +1598,18 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private final BlockDisplay display;
         private int hp;
         private int remainingTicks;
+        private float yaw;
+        private int nextMoveTicks;
+        private int moveTicksRemaining;
+        private Vector moveDirection = new Vector(0, 0, 0);
 
-        private Decoy(UUID owner, BlockDisplay display, int hp, int remainingTicks) {
+        private Decoy(UUID owner, BlockDisplay display, int hp, int remainingTicks, float yaw, int nextMoveTicks) {
             this.owner = owner;
             this.display = display;
             this.hp = hp;
             this.remainingTicks = remainingTicks;
+            this.yaw = yaw;
+            this.nextMoveTicks = nextMoveTicks;
         }
     }
 
@@ -1411,6 +1623,67 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             this.owner = owner;
             this.blockData = blockData;
             this.yaw = yaw;
+        }
+    }
+
+    private record BorderRectangle(double centerX, double centerZ, double width, double depth) {
+        private double minX() {
+            return centerX - width / 2.0;
+        }
+
+        private double maxX() {
+            return centerX + width / 2.0;
+        }
+
+        private double minZ() {
+            return centerZ - depth / 2.0;
+        }
+
+        private double maxZ() {
+            return centerZ + depth / 2.0;
+        }
+    }
+
+    private static final class BorderState {
+        private BorderRectangle current;
+        private BorderRectangle start;
+        private BorderRectangle target;
+        private long moveTicksRemaining;
+        private long moveTotalTicks;
+
+        private BorderState(double centerX, double centerZ, double width, double depth) {
+            this.current = new BorderRectangle(centerX, centerZ, width, depth);
+            this.start = current;
+            this.target = current;
+        }
+
+        private BorderRectangle current() {
+            return current;
+        }
+
+        private void beginMove(BorderRectangle target, long ticks) {
+            this.start = current;
+            this.target = target;
+            this.moveTotalTicks = Math.max(1L, ticks);
+            this.moveTicksRemaining = this.moveTotalTicks;
+        }
+
+        private void tick() {
+            if (moveTicksRemaining <= 0) return;
+            long elapsed = moveTotalTicks - moveTicksRemaining + 1;
+            double progress = Math.max(0.0, Math.min(1.0, elapsed / (double) moveTotalTicks));
+            current = new BorderRectangle(
+                    lerp(start.centerX(), target.centerX(), progress),
+                    lerp(start.centerZ(), target.centerZ(), progress),
+                    lerp(start.width(), target.width(), progress),
+                    lerp(start.depth(), target.depth(), progress)
+            );
+            moveTicksRemaining--;
+            if (moveTicksRemaining <= 0) current = target;
+        }
+
+        private static double lerp(double start, double end, double progress) {
+            return start + (end - start) * progress;
         }
     }
 }

@@ -52,6 +52,13 @@ abilities:
     lifetimeTicks: 600
     throwSpeed: 1.15
     maxFlightTicks: 80
+    moveDelayTicks: 60
+    moveIntervalTicks: 80
+    moveDurationTicks: 30
+    moveSpeed: 0.055
+  fly:
+    unlockMinTicks: 8
+    unlockFallbackTicks: 100
   flyHider:
     mp: 1600
     power: 1.85
@@ -71,18 +78,25 @@ abilities:
 
 worldBorder:
   initialSize: 128.0
+  initialWidth: 128.0
+  initialDepth: 64.0
   resetSize: 100000.0
   damageBuffer: 0.0
+  warningTicks: 1200
   stages:
     - remainingTicks: 10800
-      size: 90.0
-      seconds: 3
+      width: 90.0
+      depth: 45.0
+      seconds: 60
     - remainingTicks: 8400
-      size: 75.0
-      seconds: 3
+      width: 75.0
+      depth: 37.5
+      seconds: 60
     - remainingTicks: 6000
-      size: 60.0
-      seconds: 3
+      width: 60.0
+      depth: 30.0
+      seconds: 60
     - remainingTicks: 3600
-      size: 40.0
-      seconds: 3
+      width: 40.0
+      depth: 20.0
+      seconds: 60
