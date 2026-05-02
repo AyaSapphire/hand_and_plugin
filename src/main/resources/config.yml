@@ -40,11 +40,6 @@ abilities:
       - minecraft:piston
       - minecraft:sticky_piston
       - minecraft:piston_head
-      - minecraft:command_block
-      - minecraft:chain_command_block
-      - minecraft:repeating_command_block
-      - minecraft:jigsaw
-      - minecraft:structure_block
       - minecraft:end_portal
       - minecraft:nether_portal
       - '#minecraft:banners'
@@ -52,6 +47,12 @@ abilities:
       - '#minecraft:heads'
       - '#minecraft:tall_flowers'
       - '#minecraft:all_signs'
+      - '#minecraft:beds'
+      - '#minecraft:buttons'
+      - minecraft:snow
+      - '#minecraft:rails'
+      - minecraft:tripwire_hook
+      - minecraft:redstone_wire
   decoy:
     hp: 100
     mp: 1200
