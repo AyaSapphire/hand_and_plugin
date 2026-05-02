@@ -492,8 +492,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
 
         List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
-        if (online.isEmpty()) {
-            sender.sendMessage("没有在线玩家。");
+        if (online.size() < 2) {
+            sender.sendMessage("至少需要 2 名在线玩家才能开始游戏。");
             return;
         }
 
@@ -640,15 +640,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void updateBorder() {
         for (BorderStage stage : settings.borderStages()) {
-            int warnAt = stage.remainingTicks() + settings.borderWarningTicks();
+            int shrinkAt = Math.max(0, stage.remainingTicks() - settings.borderWarningTicks());
             if (!warnedBorderStages.contains(stage.remainingTicks())
-                    && remainingTicks <= warnAt
-                    && remainingTicks > stage.remainingTicks()) {
+                    && remainingTicks <= stage.remainingTicks()
+                    && remainingTicks > shrinkAt) {
                 BorderRectangle next = prepareNextBorder(stage);
                 warnedBorderStages.add(stage.remainingTicks());
                 announceNextBorder(stage, next);
             }
-            if (!startedBorderStages.contains(stage.remainingTicks()) && remainingTicks <= stage.remainingTicks()) {
+            if (!startedBorderStages.contains(stage.remainingTicks()) && remainingTicks <= shrinkAt) {
                 startedBorderStages.add(stage.remainingTicks());
                 shrinkBorder(stage);
             }
@@ -670,8 +670,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void checkWin() {
         if (phase != GamePhase.RUNNING) return;
         long hiders = players.values().stream().filter(state -> state.role == Role.HIDER).count();
+        long seekers = players.values().stream().filter(state -> state.role == Role.SEEKER).count();
         if (hiders == 0) {
             endGame(Role.SEEKER, "寻找者胜利！");
+        } else if (seekers == 0) {
+            endGame(Role.HIDER, "躲藏者胜利！");
         } else if (remainingTicks <= 0) {
             endGame(Role.HIDER, "躲藏者胜利！");
         }
@@ -698,7 +701,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         Bukkit.broadcast(Component.text(" ", NamedTextColor.WHITE).append(winner == Role.SEEKER
                 ? playerList(initialSeekerPlayers(), NamedTextColor.RED)
                 : playerList(playersWithRole(Role.HIDER), NamedTextColor.AQUA)));
-        Bukkit.broadcast(Component.text("--------------------------------------", NamedTextColor.WHITE));
+        Bukkit.broadcast(Component.text("------------------------------", NamedTextColor.WHITE));
         Bukkit.broadcast(Component.text("<寻找者(初)>  ", NamedTextColor.RED)
                 .append(playerList(initialSeekerPlayers(), NamedTextColor.RED)));
         Bukkit.broadcast(Component.text("<寻找者(增)>  ", NamedTextColor.RED)
@@ -1133,7 +1136,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             return;
         }
         event.setCancelled(true);
-        damagePlayer(player, state, customDamageFromVanilla(event));
+        int damage = customDamageFromVanilla(event, state);
+        if (damage <= 0) return;
+        damagePlayer(player, state, damage);
     }
 
     @EventHandler
@@ -1148,8 +1153,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.setSaturation(20f);
     }
 
-    private int customDamageFromVanilla(EntityDamageEvent event) {
-        return settings.damagePerHit();
+    private int customDamageFromVanilla(EntityDamageEvent event, GamePlayer state) {
+        if (state.role == Role.SEEKER && event.getCause() == EntityDamageEvent.DamageCause.FALL) {
+            return 0;
+        }
+        int damage = settings.damagePerHit();
+        if (state.role == Role.SEEKER) {
+            damage = Math.max(1, (int) Math.round(damage * settings.seekerDamageTakenScale()));
+        }
+        return damage;
     }
 
     private boolean isPreReleaseSeekerAttack(EntityDamageByEntityEvent event) {
@@ -1809,7 +1821,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void announceNextBorder(BorderStage stage, BorderRectangle next) {
-        int seconds = Math.max(0, (remainingTicks - stage.remainingTicks()) / 20);
+        int shrinkAt = Math.max(0, stage.remainingTicks() - settings.borderWarningTicks());
+        int seconds = Math.max(0, (stage.remainingTicks() - shrinkAt) / 20);
         Bukkit.broadcast(Component.text("下一次缩圈将在 " + seconds + " 秒后开始，绿色粒子标出了下一安全区。", NamedTextColor.YELLOW));
         for (Player player : Bukkit.getOnlinePlayers()) {
             showTitle(player, systemGlyph(SYSTEM_WORLDBORDER_WARNING), Component.empty(), 10, 70, 20);
@@ -1880,7 +1893,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (!player.getWorld().equals(getArenaSpawn().getWorld())) continue;
             renderRectangleFor(player, current, new Particle.DustOptions(Color.RED, 1.7f));
-            if (next != null) renderRectangleFor(player, next, new Particle.DustOptions(Color.LIME, 1.35f));
+            if (next != null) renderNextRectangleFor(player, current, next, new Particle.DustOptions(Color.LIME, 1.35f));
         }
     }
 
@@ -1909,6 +1922,39 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 spawnBorderParticle(player, rectangle.maxX(), y, z, maxDistanceSquared, dust);
             }
         }
+    }
+
+    private void renderNextRectangleFor(Player player, BorderRectangle current, BorderRectangle next, Particle.DustOptions dust) {
+        double spacing = Math.max(0.5, settings.borderParticleSpacing());
+        double maxDistanceSquared = settings.borderParticleViewDistance() * settings.borderParticleViewDistance();
+        double centerY = player.getLocation().getY() + 1.0;
+        for (int yOffset = -settings.borderParticleVerticalHalfRange(); yOffset <= settings.borderParticleVerticalHalfRange(); yOffset++) {
+            double y = centerY + yOffset;
+            for (double x = next.minX(); x <= next.maxX(); x += spacing) {
+                spawnBorderParticleIfNotOverlapping(player, current, x, y, next.minZ(), maxDistanceSquared, dust);
+                spawnBorderParticleIfNotOverlapping(player, current, x, y, next.maxZ(), maxDistanceSquared, dust);
+            }
+            for (double z = next.minZ(); z <= next.maxZ(); z += spacing) {
+                spawnBorderParticleIfNotOverlapping(player, current, next.minX(), y, z, maxDistanceSquared, dust);
+                spawnBorderParticleIfNotOverlapping(player, current, next.maxX(), y, z, maxDistanceSquared, dust);
+            }
+        }
+    }
+
+    private void spawnBorderParticleIfNotOverlapping(Player player, BorderRectangle current, double x, double y, double z, double maxDistanceSquared, Particle.DustOptions dust) {
+        if (isOnRectangleEdge(current, x, z)) return;
+        spawnBorderParticle(player, x, y, z, maxDistanceSquared, dust);
+    }
+
+    private boolean isOnRectangleEdge(BorderRectangle rectangle, double x, double z) {
+        double epsilon = 0.001;
+        boolean onNorthOrSouth = (Math.abs(z - rectangle.minZ()) <= epsilon || Math.abs(z - rectangle.maxZ()) <= epsilon)
+                && x >= rectangle.minX() - epsilon
+                && x <= rectangle.maxX() + epsilon;
+        boolean onWestOrEast = (Math.abs(x - rectangle.minX()) <= epsilon || Math.abs(x - rectangle.maxX()) <= epsilon)
+                && z >= rectangle.minZ() - epsilon
+                && z <= rectangle.maxZ() + epsilon;
+        return onNorthOrSouth || onWestOrEast;
     }
 
     private void spawnBorderParticle(Player player, double x, double y, double z, double maxDistanceSquared, Particle.DustOptions dust) {
@@ -1967,6 +2013,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 nonNegativeInt("player.hpRegenPerTick"),
                 nonNegativeInt("player.mpRegenPerTick"),
                 positiveInt("player.damagePerHit"),
+                clampedDouble("player.seekerDamageTakenScale", 0.1, 2.0),
                 positiveDouble("player.vanillaDamageScale"),
                 positiveInt("player.minVanillaDamage"),
                 positiveInt("player.airExtraDrainPerTick"),
@@ -2127,6 +2174,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             int hpRegenPerTick,
             int mpRegenPerTick,
             int damagePerHit,
+            double seekerDamageTakenScale,
             double vanillaDamageScale,
             int minVanillaDamage,
             int airExtraDrainPerTick,

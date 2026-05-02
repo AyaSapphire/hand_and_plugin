@@ -13,6 +13,7 @@ player:
   hpRegenPerTick: 5
   mpRegenPerTick: 10
   damagePerHit: 400
+  seekerDamageTakenScale: 0.5
   vanillaDamageScale: 100.0
   minVanillaDamage: 40
   airExtraDrainPerTick: 6
