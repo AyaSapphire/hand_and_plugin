@@ -524,10 +524,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.setHealth(getMaxHealth(player));
         player.setFoodLevel(20);
         player.setSaturation(20);
-        state.originalExp = player.getExp();
-        state.originalLevel = player.getLevel();
-        state.originalTotalExperience = player.getTotalExperience();
-        hideExperienceBar(player);
         joinScoreboardTeam(player, state.role);
 
         if (state.role == Role.HIDER) {
@@ -579,7 +575,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             tickFlyLock(player, state);
             tickAcceleratedAir(player, state);
             ensureLoadout(player, state.role);
-            hideExperienceBar(player);
             if (state.role == Role.HIDER) {
                 tickDisguise(player, state);
                 renderDisguiseTargetOutline(player);
@@ -1427,7 +1422,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (bossBar != null && state != null) {
             bossBar.addPlayer(event.getPlayer());
             ensureLoadout(event.getPlayer(), state.role);
-            hideExperienceBar(event.getPlayer());
         } else if (phase == GamePhase.RUNNING) {
             setupWaitingSpectator(event.getPlayer());
         }
@@ -1464,16 +1458,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.removePotionEffect(PotionEffectType.SLOWNESS);
         clearScoreboardTeam(player);
         removeAbilityItems(player.getInventory());
-        player.setTotalExperience(state.originalTotalExperience);
-        player.setLevel(state.originalLevel);
-        player.setExp(state.originalExp);
-    }
-
-    private void hideExperienceBar(Player player) {
-        player.setExp(0f);
-        player.setLevel(0);
-        player.setTotalExperience(0);
-        player.sendExperienceChange(0f, 0);
     }
 
     private void disableLocatorBar(World world) {
@@ -1506,7 +1490,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.removePotionEffect(PotionEffectType.SLOWNESS);
         removeAbilityItems(player.getInventory());
         if (bossBar != null) bossBar.addPlayer(player);
-        hideExperienceBar(player);
         showTitle(player, Component.text("本局进行中", NamedTextColor.YELLOW), Component.text("你已进入旁观，下一局会自动加入", NamedTextColor.GRAY), 10, 70, 20);
     }
 
@@ -2089,10 +2072,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private int flyLockTicks;
         private int borderDamageTicks;
         private int airDamageTicks;
-        private float originalExp;
-        private int originalLevel;
-        private int originalTotalExperience;
-
         private GamePlayer(UUID uuid, Role role, int hp, int mp) {
             this.uuid = uuid;
             this.role = role;
