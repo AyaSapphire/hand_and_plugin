@@ -16,8 +16,7 @@ import java.util.List;
 
 final class AdminMenu {
     enum Page {
-        HOME,
-        BORDER
+        HOME
     }
 
     private final Hide_and_seek plugin;
@@ -27,10 +26,7 @@ final class AdminMenu {
     }
 
     void open(Player player, Page page) {
-        player.openInventory(switch (page) {
-            case HOME -> buildHome();
-            case BORDER -> buildBorder();
-        });
+        player.openInventory(buildHome());
     }
 
     boolean isAdminMenu(Inventory inventory) {
@@ -43,46 +39,25 @@ final class AdminMenu {
     }
 
     private Inventory buildHome() {
-        Inventory inventory = Bukkit.createInventory(new Holder(Page.HOME), 54, Component.text("管理员菜单", NamedTextColor.GOLD));
+        Inventory inventory = Bukkit.createInventory(new Holder(Page.HOME), 27, Component.text("管理员菜单", NamedTextColor.GOLD));
         fillFrame(inventory);
 
-        placeAdjuster(inventory, 10, namedItem(Material.PLAYER_HEAD, "寻找者数量", NamedTextColor.AQUA,
+        placeAdjuster(inventory, 2, namedItem(Material.PLAYER_HEAD, "寻找者数量", NamedTextColor.AQUA,
                 List.of("当前值: " + plugin.configuredSeekerCount())));
 
-        inventory.setItem(20, namedItem(Material.LIME_WOOL, "开始游戏", NamedTextColor.GREEN,
-                List.of("开始一局新的躲猫猫")));
-        inventory.setItem(22, namedItem(Material.RED_WOOL, "停止游戏", NamedTextColor.RED,
-                List.of("停止当前对局并清理实体")));
-        inventory.setItem(24, namedItem(Material.RESPAWN_ANCHOR, "设置出生点", NamedTextColor.YELLOW,
-                List.of("将当前位置保存为小游戏出生点")));
-
-        inventory.setItem(31, namedItem(Material.ORANGE_STAINED_GLASS, "边界工具", NamedTextColor.GOLD,
-                List.of("设置初始/最终角点并预览范围")));
-        inventory.setItem(33, namedItem(Material.REPEATER, "重载配置", NamedTextColor.GREEN,
-                List.of("从 config.yml 重新读取配置")));
-
-        inventory.setItem(45, namedItem(Material.PAPER, "当前阶段", NamedTextColor.WHITE,
+        inventory.setItem(8, namedItem(Material.REPEATER, "重载配置", NamedTextColor.GREEN,
+                List.of("重新读取 config.yml")));
+        inventory.setItem(10, namedItem(Material.PAPER, "当前阶段", NamedTextColor.WHITE,
                 List.of(plugin.currentPhaseLabel())));
-        inventory.setItem(47, namedItem(Material.CLOCK, "剩余时间", NamedTextColor.WHITE,
+        inventory.setItem(12, namedItem(Material.CLOCK, "剩余时间", NamedTextColor.WHITE,
                 List.of(plugin.remainingSeconds() + " 秒")));
-        inventory.setItem(49, namedItem(Material.RESPAWN_ANCHOR, "小游戏出生点", NamedTextColor.WHITE,
+        inventory.setItem(14, namedItem(Material.RESPAWN_ANCHOR, "小游戏出生点", NamedTextColor.WHITE,
                 List.of(plugin.arenaSpawnSummary())));
-        inventory.setItem(51, namedItem(Material.RED_STAINED_GLASS, "边界概览", NamedTextColor.WHITE,
+        inventory.setItem(16, namedItem(Material.RED_STAINED_GLASS, "边界概览", NamedTextColor.WHITE,
                 List.of(plugin.borderStatusSummary())));
-        return inventory;
-    }
-
-    private Inventory buildBorder() {
-        Inventory inventory = Bukkit.createInventory(new Holder(Page.BORDER), 54, Component.text("管理员菜单 - 边界工具", NamedTextColor.GOLD));
-        fillFrame(inventory);
-        inventory.setItem(20, namedItem(Material.RED_CONCRETE, "设为初始边界角点", NamedTextColor.RED,
-                List.of("使用当前位置与出生点构造初始矩形")));
-        inventory.setItem(22, namedItem(Material.ORANGE_CONCRETE, "设为最终边界角点", NamedTextColor.GOLD,
-                List.of("使用当前位置与出生点构造最终矩形")));
-        inventory.setItem(24, namedItem(Material.SPYGLASS, "预览边界", NamedTextColor.AQUA,
-                List.of("在世界中短暂显示当前初始与最终边界")));
-        inventory.setItem(49, namedItem(Material.ARROW, "返回主页", NamedTextColor.WHITE,
-                List.of("返回管理员首页")));
+        inventory.setItem(22, namedItem(Material.NETHER_STAR, "快捷工具", NamedTextColor.GOLD,
+                List.of("开始/结束/设出生点/角点/预览",
+                        "都已放在你的快捷栏中")));
         return inventory;
     }
 

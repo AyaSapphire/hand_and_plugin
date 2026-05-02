@@ -13,11 +13,13 @@ import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerGameModeChangeEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -25,6 +27,7 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,18 +35,16 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 final class AdminController implements Listener {
-    private static final int MENU_SLOT = 8;
-
     private final Hide_and_seek plugin;
     private final AdminMenu menu;
-    private final NamespacedKey adminItemKey;
+    private final NamespacedKey adminToolKey;
     private final Set<UUID> admins = ConcurrentHashMap.newKeySet();
     private final Map<UUID, BukkitTask> previewTasks = new ConcurrentHashMap<>();
 
     AdminController(Hide_and_seek plugin) {
         this.plugin = plugin;
         this.menu = new AdminMenu(plugin);
-        this.adminItemKey = new NamespacedKey(plugin, "admin_menu");
+        this.adminToolKey = new NamespacedKey(plugin, "admin_tool");
     }
 
     boolean isAdmin(UUID uuid) {
@@ -69,7 +70,7 @@ final class AdminController implements Listener {
             }
             enterAdminMode(player, true);
         } else {
-            ensureMenuItem(player);
+            ensureAdminTools(player);
         }
         menu.open(player, AdminMenu.Page.HOME);
     }
@@ -77,7 +78,7 @@ final class AdminController implements Listener {
     void startGameAsPlayer(Player player) {
         cancelPreview(player.getUniqueId());
         if (admins.remove(player.getUniqueId())) {
-            removeMenuItem(player);
+            removeAdminTools(player);
         }
         if (player.getGameMode() == GameMode.CREATIVE) {
             player.setGameMode(GameMode.ADVENTURE);
@@ -129,10 +130,30 @@ final class AdminController implements Listener {
     @EventHandler
     public void onInteract(PlayerInteractEvent event) {
         if (event.getHand() != EquipmentSlot.HAND) return;
-        if (!isAdminItem(event.getItem())) return;
+        AdminTool tool = adminToolOf(event.getItem());
+        if (tool == null) return;
+
         event.setCancelled(true);
-        if (!isAdmin(event.getPlayer().getUniqueId())) enterAdminMode(event.getPlayer(), true);
-        menu.open(event.getPlayer(), AdminMenu.Page.HOME);
+        Player player = event.getPlayer();
+        if (!isAdmin(player.getUniqueId())) {
+            enterAdminMode(player, true);
+        }
+        handleToolUse(player, tool);
+    }
+
+    @EventHandler
+    public void onItemHeld(PlayerItemHeldEvent event) {
+        if (!isAdmin(event.getPlayer().getUniqueId())) return;
+        ItemStack nextItem = event.getPlayer().getInventory().getItem(event.getNewSlot());
+        AdminTool tool = adminToolOf(nextItem);
+        if (tool == null || !tool.triggersPreviewAssist()) return;
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (!event.getPlayer().isOnline() || !isAdmin(event.getPlayer().getUniqueId())) return;
+                startPreview(event.getPlayer());
+            }
+        }.runTask(plugin);
     }
 
     @EventHandler
@@ -153,7 +174,7 @@ final class AdminController implements Listener {
         if (menu.isAdminMenu(top)) {
             event.setCancelled(true);
             if (event.getClickedInventory() == null || event.getRawSlot() >= top.getSize()) return;
-            handleMenuClick(player, menu.pageOf(top), event.getRawSlot());
+            handleHomeClick(player, event.getRawSlot());
             return;
         }
 
@@ -162,38 +183,13 @@ final class AdminController implements Listener {
         }
     }
 
-    private void handleMenuClick(Player player, AdminMenu.Page page, int slot) {
-        switch (page) {
-            case HOME -> handleHomeClick(player, slot);
-            case BORDER -> handleBorderClick(player, slot);
-        }
-    }
-
     private void handleHomeClick(Player player, int slot) {
         switch (slot) {
-            case 10 -> plugin.adjustConfiguredSeekerCount(-2);
-            case 11 -> plugin.adjustConfiguredSeekerCount(-1);
-            case 13 -> plugin.adjustConfiguredSeekerCount(1);
-            case 14 -> plugin.adjustConfiguredSeekerCount(2);
-            case 20 -> {
-                player.closeInventory();
-                startGameAsPlayer(player);
-                return;
-            }
-            case 22 -> {
-                plugin.stopGameFromAdmin();
-                feedback(player, "已停止当前对局。", NamedTextColor.RED);
-            }
-            case 24 -> {
-                plugin.setArenaSpawnFromAdmin(player);
-                feedback(player, "已将当前位置设为小游戏出生点。", NamedTextColor.YELLOW);
-            }
-            case 31 -> {
-                menu.open(player, AdminMenu.Page.BORDER);
-                click(player);
-                return;
-            }
-            case 33 -> {
+            case 2 -> plugin.adjustConfiguredSeekerCount(-2);
+            case 3 -> plugin.adjustConfiguredSeekerCount(-1);
+            case 5 -> plugin.adjustConfiguredSeekerCount(1);
+            case 6 -> plugin.adjustConfiguredSeekerCount(2);
+            case 8 -> {
                 plugin.reloadGameConfigFromAdmin();
                 feedback(player, "已重载配置。", NamedTextColor.GREEN);
             }
@@ -204,44 +200,62 @@ final class AdminController implements Listener {
         menu.open(player, AdminMenu.Page.HOME);
     }
 
-    private void handleBorderClick(Player player, int slot) {
-        switch (slot) {
-            case 20 -> {
+    private void handleToolUse(Player player, AdminTool tool) {
+        switch (tool) {
+            case START_GAME -> {
+                if (plugin.isGameRunning()) {
+                    feedback(player, "当前已有对局进行中。", NamedTextColor.RED);
+                    return;
+                }
+                player.closeInventory();
+                startGameAsPlayer(player);
+            }
+            case STOP_GAME -> {
+                if (!plugin.isGameRunning()) {
+                    feedback(player, "当前没有正在进行的对局。", NamedTextColor.GRAY);
+                    return;
+                }
+                plugin.stopGameFromAdmin();
+                feedback(player, "已停止当前对局。", NamedTextColor.RED);
+            }
+            case SET_SPAWN -> {
+                plugin.setArenaSpawnFromAdmin(player);
+                startPreview(player);
+                feedback(player, "已将当前位置设为小游戏出生点。", NamedTextColor.YELLOW);
+            }
+            case SET_INITIAL_CORNER -> {
                 if (!plugin.canUseBorderCorner(player.getLocation())) {
                     feedback(player, "请先回到小游戏出生点所在世界。", NamedTextColor.RED);
-                } else {
-                    plugin.setConfiguredBorderInitialFromCorner(player.getLocation());
-                    feedback(player, "已使用当前位置设置初始边界角点。", NamedTextColor.YELLOW);
+                    return;
                 }
+                plugin.setConfiguredBorderInitialFromCorner(player.getLocation());
+                startPreview(player);
+                feedback(player, "已使用当前位置设置初始边界角点，并开始预览。", NamedTextColor.YELLOW);
             }
-            case 22 -> {
+            case SET_FINAL_CORNER -> {
                 if (!plugin.canUseBorderCorner(player.getLocation())) {
                     feedback(player, "请先回到小游戏出生点所在世界。", NamedTextColor.RED);
-                } else {
-                    plugin.setConfiguredBorderFinalFromCorner(player.getLocation());
-                    feedback(player, "已使用当前位置设置最终边界角点。", NamedTextColor.GOLD);
+                    return;
                 }
+                plugin.setConfiguredBorderFinalFromCorner(player.getLocation());
+                startPreview(player);
+                feedback(player, "已使用当前位置设置最终边界角点，并开始预览。", NamedTextColor.GOLD);
             }
-            case 24 -> {
+            case PREVIEW_BORDERS -> {
                 startPreview(player);
                 feedback(player, "已开始预览边界，持续 10 秒。", NamedTextColor.AQUA);
             }
-            case 49 -> {
-                menu.open(player, AdminMenu.Page.HOME);
+            case OPEN_MENU -> {
                 click(player);
-                return;
-            }
-            default -> {
-                return;
+                menu.open(player, AdminMenu.Page.HOME);
             }
         }
-        menu.open(player, AdminMenu.Page.BORDER);
     }
 
     private void enterAdminMode(Player player, boolean notify) {
         boolean newlyAdded = admins.add(player.getUniqueId());
         plugin.removePlayerFromGameForAdmin(player);
-        ensureMenuItem(player);
+        ensureAdminTools(player);
         if (notify && newlyAdded) {
             player.sendMessage(Component.text("已成为管理员。你不会加入或干扰当前对局。", NamedTextColor.GOLD));
         }
@@ -250,19 +264,21 @@ final class AdminController implements Listener {
     private void settleAdminIntoSpectator(Player player, boolean notify) {
         if (!admins.remove(player.getUniqueId())) return;
         cancelPreview(player.getUniqueId());
-        removeMenuItem(player);
+        removeAdminTools(player);
         plugin.placePlayerIntoWaitingState(player);
         if (notify) {
             player.sendMessage(Component.text("已离开管理员模式。本局中你将以旁观者等待下一局。", NamedTextColor.YELLOW));
         }
     }
 
-    private void ensureMenuItem(Player player) {
+    private void ensureAdminTools(Player player) {
         PlayerInventory inventory = player.getInventory();
-        inventory.setItem(MENU_SLOT, createMenuItem());
+        for (AdminTool tool : AdminTool.values()) {
+            inventory.setItem(tool.slot(), createToolItem(tool));
+        }
     }
 
-    private void removeMenuItem(Player player) {
+    private void removeAdminTools(Player player) {
         PlayerInventory inventory = player.getInventory();
         for (int slot = 0; slot < inventory.getSize(); slot++) {
             if (isAdminItem(inventory.getItem(slot))) inventory.setItem(slot, null);
@@ -273,7 +289,7 @@ final class AdminController implements Listener {
     private void startPreview(Player player) {
         cancelPreview(player.getUniqueId());
         BukkitTask task = new BukkitRunnable() {
-            private int ticks;
+            private int repeats;
 
             @Override
             public void run() {
@@ -283,13 +299,13 @@ final class AdminController implements Listener {
                     return;
                 }
                 plugin.renderConfiguredBorderPreview(player);
-                ticks++;
-                if (ticks >= 200) {
+                repeats++;
+                if (repeats >= 50) {
                     cancelPreview(player.getUniqueId());
                     cancel();
                 }
             }
-        }.runTaskTimer(plugin, 0L, 5L);
+        }.runTaskTimer(plugin, 0L, 4L);
         previewTasks.put(player.getUniqueId(), task);
     }
 
@@ -307,21 +323,81 @@ final class AdminController implements Listener {
         player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1.1f);
     }
 
-    private ItemStack createMenuItem() {
-        ItemStack item = new ItemStack(Material.NETHER_STAR);
+    private ItemStack createToolItem(AdminTool tool) {
+        ItemStack item = new ItemStack(tool.material());
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(Component.text("管理员菜单", NamedTextColor.GOLD));
-        meta.lore(List.of(
-                Component.text("右键打开管理员菜单", NamedTextColor.GRAY),
-                Component.text("创造模式下会自动保持主持身份", NamedTextColor.DARK_GRAY)
-        ));
-        meta.getPersistentDataContainer().set(adminItemKey, PersistentDataType.BYTE, (byte) 1);
+        meta.displayName(Component.text(tool.displayName(), tool.color()));
+        List<Component> lore = new ArrayList<>();
+        for (String line : tool.lore()) {
+            lore.add(Component.text(line, NamedTextColor.GRAY));
+        }
+        meta.lore(lore);
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+        meta.getPersistentDataContainer().set(adminToolKey, PersistentDataType.STRING, tool.name());
         item.setItemMeta(meta);
         return item;
     }
 
     private boolean isAdminItem(ItemStack item) {
-        if (item == null || !item.hasItemMeta()) return false;
-        return item.getItemMeta().getPersistentDataContainer().has(adminItemKey, PersistentDataType.BYTE);
+        return adminToolOf(item) != null;
+    }
+
+    private AdminTool adminToolOf(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return null;
+        String raw = item.getItemMeta().getPersistentDataContainer().get(adminToolKey, PersistentDataType.STRING);
+        if (raw == null) return null;
+        try {
+            return AdminTool.valueOf(raw);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    private enum AdminTool {
+        START_GAME(2, Material.LIME_WOOL, "开始游戏", NamedTextColor.GREEN, List.of("右键后会离开管理员模式", "并作为普通玩家加入本局")),
+        STOP_GAME(3, Material.RED_WOOL, "结束游戏", NamedTextColor.RED, List.of("右键立即结束当前对局")),
+        SET_SPAWN(4, Material.RESPAWN_ANCHOR, "设置出生点", NamedTextColor.YELLOW, List.of("右键将当前位置设为小游戏出生点")),
+        SET_INITIAL_CORNER(5, Material.RED_CONCRETE, "设置初始角点", NamedTextColor.RED, List.of("右键用当前位置设置初始边界", "会自动显示出生点和边界预览")),
+        SET_FINAL_CORNER(6, Material.ORANGE_CONCRETE, "设置最终角点", NamedTextColor.GOLD, List.of("右键用当前位置设置最终边界", "会自动显示出生点和边界预览")),
+        PREVIEW_BORDERS(7, Material.SPYGLASS, "预览边界", NamedTextColor.AQUA, List.of("右键显示出生点光柱", "并预览初始与最终边界 10 秒")),
+        OPEN_MENU(8, Material.NETHER_STAR, "管理员菜单", NamedTextColor.GOLD, List.of("右键打开精简管理员菜单", "可调整寻找者数量并查看状态"));
+
+        private final int slot;
+        private final Material material;
+        private final String displayName;
+        private final NamedTextColor color;
+        private final List<String> lore;
+
+        AdminTool(int slot, Material material, String displayName, NamedTextColor color, List<String> lore) {
+            this.slot = slot;
+            this.material = material;
+            this.displayName = displayName;
+            this.color = color;
+            this.lore = lore;
+        }
+
+        int slot() {
+            return slot;
+        }
+
+        Material material() {
+            return material;
+        }
+
+        String displayName() {
+            return displayName;
+        }
+
+        NamedTextColor color() {
+            return color;
+        }
+
+        List<String> lore() {
+            return lore;
+        }
+
+        boolean triggersPreviewAssist() {
+            return this == SET_SPAWN || this == SET_INITIAL_CORNER || this == SET_FINAL_CORNER || this == PREVIEW_BORDERS;
+        }
     }
 }

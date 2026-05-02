@@ -532,10 +532,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     void renderConfiguredBorderPreview(Player viewer) {
         if (!canUseBorderCorner(viewer.getLocation())) return;
         Location center = getArenaSpawn();
+        renderSpawnMarkerFor(viewer, center);
         BorderRectangle initial = new BorderRectangle(center.getX(), center.getZ(), configuredBorderInitialWidth(), configuredBorderInitialDepth());
         BorderRectangle fin = new BorderRectangle(center.getX(), center.getZ(), configuredBorderFinalWidth(), configuredBorderFinalDepth());
-        renderRectangleFor(viewer, initial, new Particle.DustOptions(Color.RED, 1.7f));
-        renderRectangleFor(viewer, fin, new Particle.DustOptions(Color.LIME, 1.35f));
+        renderPreviewRectangleFor(viewer, initial, new Particle.DustOptions(Color.RED, 1.85f));
+        renderPreviewRectangleFor(viewer, fin, new Particle.DustOptions(Color.LIME, 1.55f));
     }
 
     void removePlayerFromGameForAdmin(Player player) {
@@ -2155,11 +2156,51 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void renderRectangleFor(Player player, BorderRectangle rectangle, Particle.DustOptions dust) {
-        double spacing = Math.max(0.5, settings.borderParticleSpacing());
-        double maxDistanceSquared = settings.borderParticleViewDistance() * settings.borderParticleViewDistance();
         double centerY = player.getLocation().getY() + 1.0;
-        for (int yOffset = -settings.borderParticleVerticalHalfRange(); yOffset <= settings.borderParticleVerticalHalfRange(); yOffset++) {
-            double y = centerY + yOffset;
+        renderRectangleColumnsFor(
+                player,
+                rectangle,
+                dust,
+                1.0,
+                centerY - 7.0,
+                centerY + 7.0,
+                3.0,
+                settings.borderParticleViewDistance()
+        );
+    }
+
+    private void renderPreviewRectangleFor(Player player, BorderRectangle rectangle, Particle.DustOptions dust) {
+        World world = player.getWorld();
+        renderRectangleColumnsFor(
+                player,
+                rectangle,
+                dust,
+                3.0,
+                world.getMinHeight() + 0.5,
+                world.getMaxHeight() - 0.5,
+                3.0,
+                Math.max(settings.borderParticleViewDistance(), 256.0)
+        );
+    }
+
+    private void renderNextRectangleFor(Player player, BorderRectangle current, BorderRectangle next, Particle.DustOptions dust) {
+        double centerY = player.getLocation().getY() + 1.0;
+        renderNextRectangleColumnsFor(
+                player,
+                current,
+                next,
+                dust,
+                1.0,
+                centerY - 7.0,
+                centerY + 7.0,
+                3.0,
+                settings.borderParticleViewDistance()
+        );
+    }
+
+    private void renderRectangleColumnsFor(Player player, BorderRectangle rectangle, Particle.DustOptions dust, double spacing, double minY, double maxY, double verticalStep, double maxDistance) {
+        double maxDistanceSquared = maxDistance * maxDistance;
+        for (double y = minY; y <= maxY; y += verticalStep) {
             for (double x = rectangle.minX(); x <= rectangle.maxX(); x += spacing) {
                 spawnBorderParticle(player, x, y, rectangle.minZ(), maxDistanceSquared, dust);
                 spawnBorderParticle(player, x, y, rectangle.maxZ(), maxDistanceSquared, dust);
@@ -2171,12 +2212,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
     }
 
-    private void renderNextRectangleFor(Player player, BorderRectangle current, BorderRectangle next, Particle.DustOptions dust) {
-        double spacing = Math.max(0.5, settings.borderParticleSpacing());
-        double maxDistanceSquared = settings.borderParticleViewDistance() * settings.borderParticleViewDistance();
-        double centerY = player.getLocation().getY() + 1.0;
-        for (int yOffset = -settings.borderParticleVerticalHalfRange(); yOffset <= settings.borderParticleVerticalHalfRange(); yOffset++) {
-            double y = centerY + yOffset;
+    private void renderNextRectangleColumnsFor(Player player, BorderRectangle current, BorderRectangle next, Particle.DustOptions dust, double spacing, double minY, double maxY, double verticalStep, double maxDistance) {
+        double maxDistanceSquared = maxDistance * maxDistance;
+        for (double y = minY; y <= maxY; y += verticalStep) {
             for (double x = next.minX(); x <= next.maxX(); x += spacing) {
                 spawnBorderParticleIfNotOverlapping(player, current, x, y, next.minZ(), maxDistanceSquared, dust);
                 spawnBorderParticleIfNotOverlapping(player, current, x, y, next.maxZ(), maxDistanceSquared, dust);
@@ -2186,6 +2224,20 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 spawnBorderParticleIfNotOverlapping(player, current, next.maxX(), y, z, maxDistanceSquared, dust);
             }
         }
+    }
+
+    private void renderSpawnMarkerFor(Player player, Location center) {
+        World world = center.getWorld();
+        if (world == null || !world.equals(player.getWorld())) return;
+        Particle.DustOptions dust = new Particle.DustOptions(Color.AQUA, 1.6f);
+        double maxDistanceSquared = Math.max(settings.borderParticleViewDistance(), 256.0) * Math.max(settings.borderParticleViewDistance(), 256.0);
+        for (double y = world.getMinHeight() + 0.5; y <= world.getMaxHeight() - 0.5; y += 2.0) {
+            Location location = new Location(world, center.getX(), y, center.getZ());
+            if (location.distanceSquared(player.getLocation()) > maxDistanceSquared) continue;
+            player.spawnParticle(Particle.DUST, location, 2, 0.05, 0, 0.05, 0, dust);
+        }
+        Location focus = center.clone().add(0, 1.0, 0);
+        player.spawnParticle(Particle.END_ROD, focus, 6, 0.2, 0.4, 0.2, 0.01);
     }
 
     private void spawnBorderParticleIfNotOverlapping(Player player, BorderRectangle current, double x, double y, double z, double maxDistanceSquared, Particle.DustOptions dust) {
