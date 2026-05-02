@@ -1,7 +1,9 @@
 package cn.xducraft.hide_and_seek;
 
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
@@ -12,6 +14,7 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
+import org.bukkit.SoundCategory;
 import org.bukkit.Tag;
 import org.bukkit.World;
 import org.bukkit.WorldBorder;
@@ -82,10 +85,20 @@ import java.time.Duration;
 import java.util.UUID;
 
 public final class Hide_and_seek extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
+    private static final Key SYSTEM_FONT = Key.key("minecraft", "system");
+    private static final Key PLAYER_UI_FONT = Key.key("minecraft", "player_ui_1");
+    private static final String SYSTEM_SEEKER_WIN = "\uE001";
+    private static final String SYSTEM_HIDER_WIN = "\uE002";
+    private static final String SYSTEM_WORLDBORDER_WARNING = "\uE003";
+    private static final String SYSTEM_WORLDBORDER_SHRINK = "\uE004";
+    private static final String SYSTEM_RELEASE_SEEKER = "\uE005";
+    private static final String SYSTEM_START_SEEKER = "\uE006";
+    private static final String SYSTEM_START_HIDER = "\uE007";
     private final Map<UUID, GamePlayer> players = new HashMap<>();
     private final List<Decoy> decoys = new ArrayList<>();
     private final Map<UUID, DecoyProjectile> decoyProjectiles = new HashMap<>();
     private final List<AttackBullet> attackBullets = new ArrayList<>();
+    private final List<ScanEffect> scanEffects = new ArrayList<>();
     private final Set<UUID> initialSeekers = new HashSet<>();
     private final Set<UUID> waitingSpectators = new HashSet<>();
     private final Map<Integer, BorderRectangle> pendingBorders = new HashMap<>();
@@ -100,6 +113,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private GamePhase phase = GamePhase.IDLE;
     private Location arenaSpawn;
     private BorderState borderState;
+    private ItemDisplay jailCell;
+    private int jailCellOpenTicks = -1;
     private int borderParticleTick;
     private int remainingTicks;
 
@@ -494,6 +509,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
 
         setupWorldBorder(spawn);
+        spawnJailCell(spawn);
         Bukkit.broadcast(Component.text("躲猫猫开始！前 30 秒寻找者等待，躲藏者快藏好。", NamedTextColor.GOLD));
         gameTask = Bukkit.getScheduler().runTaskTimer(this, this::tickGame, 1L, 1L);
     }
@@ -510,12 +526,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (state.role == Role.HIDER) {
             spawnDisguiseDisplay(player, state);
             giveHiderLoadout(player);
-            showTitle(player, Component.text("躲藏者", NamedTextColor.GREEN), Component.text("伪装成方块并坚持到倒计时结束", NamedTextColor.GRAY), 10, 60, 10);
+            showTitle(player, systemGlyph(SYSTEM_START_HIDER), Component.empty(), 10, 60, 10);
         } else {
             giveSeekerLoadout(player);
             player.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 620, 0, false, false, false));
             player.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 620, 10, false, false, false));
-            showTitle(player, Component.text("寻找者", NamedTextColor.RED), Component.text("30 秒后出发，找出所有躲藏者", NamedTextColor.GRAY), 10, 60, 10);
+            showTitle(player, systemGlyph(SYSTEM_START_SEEKER), Component.empty(), 10, 60, 10);
         }
     }
 
@@ -526,6 +542,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
         if (remainingTicks == settings.seekerReleaseAt()) {
             Bukkit.broadcast(Component.text("寻找者已释放！", NamedTextColor.RED));
+            openJailCell();
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                showTitle(player, systemGlyph(SYSTEM_RELEASE_SEEKER), Component.empty(), 5, 45, 10);
+            }
             playersWithRole(Role.SEEKER).forEach(player -> {
                 player.removePotionEffect(PotionEffectType.BLINDNESS);
                 player.removePotionEffect(PotionEffectType.SLOWNESS);
@@ -538,6 +558,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         tickDecoys();
         tickDecoyProjectiles();
         tickAttackBullets();
+        tickScanEffects();
+        tickJailCell();
         checkWin();
     }
 
@@ -550,7 +572,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             tickFlyLock(player, state);
             tickAcceleratedAir(player, state);
             ensureLoadout(player, state.role);
-            if (state.role == Role.HIDER) tickDisguise(player, state);
+            if (state.role == Role.HIDER) {
+                tickDisguise(player, state);
+                renderDisguiseTargetOutline(player);
+            }
             player.setFoodLevel(20);
             player.setSaturation(20);
             player.sendActionBar(statusLine(state));
@@ -626,6 +651,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         BorderRectangle next = prepareNextBorder(stage);
         borderState.beginMove(next, Math.max(1, stage.seconds() * 20L));
         Bukkit.broadcast(Component.text("世界边界开始缩小。跟随粒子返回安全区。", NamedTextColor.RED));
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            showTitle(player, systemGlyph(SYSTEM_WORLDBORDER_SHRINK), Component.empty(), 5, 45, 10);
+        }
     }
 
     private void checkWin() {
@@ -639,11 +667,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void endGame(Role winner, String message) {
-        Component title = Component.text(message, winner == Role.HIDER ? NamedTextColor.GREEN : NamedTextColor.RED);
-        Bukkit.broadcast(title);
+        Component chatTitle = Component.text(message, winner == Role.HIDER ? NamedTextColor.GREEN : NamedTextColor.RED);
+        Component visualTitle = systemGlyph(winner == Role.HIDER ? SYSTEM_HIDER_WIN : SYSTEM_SEEKER_WIN);
+        Bukkit.broadcast(chatTitle);
         broadcastResult(winner);
         for (Player player : Bukkit.getOnlinePlayers()) {
-            showTitle(player, title, Component.empty(), 10, 70, 20);
+            showTitle(player, visualTitle, Component.empty(), 10, 70, 20);
             player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1f);
         }
         stopGame(false);
@@ -696,10 +725,18 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         for (AttackBullet bullet : attackBullets) {
             if (bullet.display != null) bullet.display.remove();
         }
+        for (ScanEffect scanEffect : scanEffects) {
+            if (scanEffect.display != null) scanEffect.display.remove();
+        }
+        if (jailCell != null) {
+            jailCell.remove();
+            jailCell = null;
+        }
 
         decoys.clear();
         decoyProjectiles.clear();
         attackBullets.clear();
+        scanEffects.clear();
         initialSeekers.clear();
         pendingBorders.clear();
         warnedBorderStages.clear();
@@ -709,6 +746,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         World world = getArenaSpawn().getWorld();
         if (world != null) world.getWorldBorder().changeSize(settings.borderResetSize(), 0L);
         borderState = null;
+        jailCellOpenTicks = -1;
         phase = GamePhase.IDLE;
         remainingTicks = 0;
         if (announce) Bukkit.broadcast(Component.text("躲猫猫已停止。", NamedTextColor.YELLOW));
@@ -721,6 +759,43 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         border.setDamageBuffer(settings.borderDamageBuffer());
         borderState = new BorderState(center.getX(), center.getZ(), settings.borderInitialWidth(), settings.borderInitialDepth());
         borderParticleTick = 0;
+    }
+
+    private void spawnJailCell(Location spawn) {
+        if (jailCell != null) jailCell.remove();
+        Location location = spawn.clone();
+        location.setYaw(0f);
+        location.setPitch(0f);
+        jailCell = location.getWorld().spawn(location, ItemDisplay.class, display -> {
+            display.setItemStack(resourcePackItem(Material.WHITE_DYE, new NamespacedKey("animated_java", "jail_cell/bone")));
+            display.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
+            display.setPersistent(false);
+            display.setTeleportDuration(2);
+            display.setViewRange(128f);
+            display.setTransformation(new Transformation(
+                    new Vector3f(-0.5f, 0f, -0.5f),
+                    new Quaternionf(),
+                    new Vector3f(3.5f, 3.5f, 3.5f),
+                    new Quaternionf()
+            ));
+        });
+        jailCellOpenTicks = -1;
+    }
+
+    private void openJailCell() {
+        if (jailCell == null || jailCell.isDead()) return;
+        jailCellOpenTicks = 0;
+    }
+
+    private void tickJailCell() {
+        if (jailCell == null || jailCellOpenTicks < 0) return;
+        jailCellOpenTicks++;
+        jailCell.teleport(jailCell.getLocation().add(0, 0.45, 0));
+        if (jailCellOpenTicks >= 12) {
+            jailCell.remove();
+            jailCell = null;
+            jailCellOpenTicks = -1;
+        }
     }
 
     private void spawnDisguiseDisplay(Player player, GamePlayer state) {
@@ -808,15 +883,18 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         ItemMeta meta = item.getItemMeta();
         meta.displayName(Component.text(name));
         meta.lore(lore.stream().map(Component::text).toList());
-        int modelData = abilityCustomModelData(ability);
-        if (modelData > 0) {
-            var modelDataComponent = meta.getCustomModelDataComponent();
-            modelDataComponent.setFloats(List.of((float) modelData));
-            meta.setCustomModelDataComponent(modelDataComponent);
-        }
+        meta.setItemModel(NamespacedKey.minecraft("ability/" + ability));
         PersistentDataContainer pdc = meta.getPersistentDataContainer();
         pdc.set(abilityKey, PersistentDataType.STRING, ability);
         pdc.set(noDropKey, PersistentDataType.BYTE, (byte) 1);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack resourcePackItem(Material material, NamespacedKey itemModel) {
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+        meta.setItemModel(itemModel);
         item.setItemMeta(meta);
         return item;
     }
@@ -873,6 +951,40 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return settings.disguiseBlacklist().contains(material);
     }
 
+    private void renderDisguiseTargetOutline(Player player) {
+        if (!"disguise".equals(getAbility(player.getInventory().getItemInMainHand()))) return;
+        Block target = player.getTargetBlockExact(settings.disguiseRange(), FluidCollisionMode.NEVER);
+        if (target == null || target.getType().isAir()) return;
+        boolean valid = target.getType().isBlock() && !isBlockedDisguise(target.getType());
+        Particle.DustOptions dust = valid
+                ? new Particle.DustOptions(Color.WHITE, 0.8f)
+                : new Particle.DustOptions(Color.RED, 0.8f);
+        Location center = target.getLocation().add(0.5, 0.5, 0.5);
+        double[] edges = {-0.5, 0.0, 0.5};
+        for (double x : edges) {
+            for (double z : edges) {
+                spawnTargetParticle(player, center, x, -0.5, z, dust);
+                spawnTargetParticle(player, center, x, 0.5, z, dust);
+            }
+        }
+        for (double x : edges) {
+            for (double y : edges) {
+                spawnTargetParticle(player, center, x, y, -0.5, dust);
+                spawnTargetParticle(player, center, x, y, 0.5, dust);
+            }
+        }
+        for (double z : edges) {
+            for (double y : edges) {
+                spawnTargetParticle(player, center, -0.5, y, z, dust);
+                spawnTargetParticle(player, center, 0.5, y, z, dust);
+            }
+        }
+    }
+
+    private void spawnTargetParticle(Player player, Location center, double x, double y, double z, Particle.DustOptions dust) {
+        player.spawnParticle(Particle.DUST, center.clone().add(x, y, z), 1, 0, 0, 0, 0, dust);
+    }
+
     private void releaseDisguise(Player player, GamePlayer state) {
         if (state.role != Role.HIDER) return;
         state.disguised = false;
@@ -903,6 +1015,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (!consumeMp(player, state, settings.decoyMp())) return;
 
         Snowball projectile = player.launchProjectile(Snowball.class);
+        projectile.setItem(resourcePackItem(Material.SNOWBALL, NamespacedKey.minecraft(".empty")));
         projectile.setVelocity(player.getEyeLocation().getDirection().normalize().multiply(settings.decoyThrowSpeed()));
         projectile.getPersistentDataContainer().set(decoyProjectileKey, PersistentDataType.BYTE, (byte) 1);
         decoyProjectiles.put(projectile.getUniqueId(), new DecoyProjectile(
@@ -955,13 +1068,24 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void useScan(Player player, GamePlayer state) {
         if (state.role != Role.SEEKER) return;
         if (!consumeMp(player, state, settings.scanMp())) return;
-        player.getWorld().spawnParticle(Particle.SONIC_BOOM, player.getLocation().add(0, 1, 0), 1);
-        player.playSound(player.getLocation(), Sound.ENTITY_WARDEN_SONIC_BOOM, 0.6f, 1.4f);
-        boolean found = playersWithRole(Role.HIDER).stream()
-                .anyMatch(hider -> hider.getWorld().equals(player.getWorld()) && hider.getLocation().distance(player.getLocation()) <= settings.scanRadius());
-        Bukkit.getScheduler().runTaskLater(this, () -> player.sendMessage(found
-                ? Component.text("扫描范围内发现躲藏者。", NamedTextColor.RED)
-                : Component.text("扫描范围内没有发现躲藏者。", NamedTextColor.GREEN)), settings.scanResultDelayTicks());
+        Location location = player.getLocation().clone();
+        ItemDisplay display = player.getWorld().spawn(location, ItemDisplay.class, spawned -> {
+            spawned.setItemStack(resourcePackItem(Material.WHITE_DYE, new NamespacedKey("animated_java", "scan_effect/scan_effect")));
+            spawned.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
+            spawned.setPersistent(false);
+            spawned.setTeleportDuration(1);
+            spawned.setViewRange(96f);
+            spawned.setTransformation(new Transformation(
+                    new Vector3f(-0.5f, 0f, -0.5f),
+                    new Quaternionf(),
+                    new Vector3f(0.25f, 0.25f, 0.25f),
+                    new Quaternionf()
+            ));
+        });
+        scanEffects.add(new ScanEffect(player.getUniqueId(), display, location));
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            viewer.playSound(location, "minecraft:scan", SoundCategory.MASTER, 1f, 1f);
+        }
     }
 
     @EventHandler
@@ -1076,6 +1200,43 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (hit) {
                 bullet.display.getWorld().spawnParticle(Particle.CRIT, bullet.display.getLocation(), 16, 0.2, 0.2, 0.2, 0.05);
                 bullet.display.remove();
+                iterator.remove();
+            }
+        }
+    }
+
+    private void tickScanEffects() {
+        Iterator<ScanEffect> iterator = scanEffects.iterator();
+        while (iterator.hasNext()) {
+            ScanEffect scanEffect = iterator.next();
+            if (scanEffect.display == null || scanEffect.display.isDead()) {
+                iterator.remove();
+                continue;
+            }
+            scanEffect.age++;
+            double progress = Math.min(1.0, scanEffect.age / (double) settings.scanResultDelayTicks());
+            float scale = (float) (0.35 + progress * settings.scanRadius() / 2.2);
+            scanEffect.display.setRotation(scanEffect.age * 18f, 0f);
+            scanEffect.display.setTransformation(new Transformation(
+                    new Vector3f(-0.5f, 0f, -0.5f),
+                    new Quaternionf(),
+                    new Vector3f(scale, scale, scale),
+                    new Quaternionf()
+            ));
+            double radius = Math.max(1.0, settings.scanRadius() * progress);
+            if (!scanEffect.caught) {
+                scanEffect.caught = playersWithRole(Role.HIDER).stream()
+                        .anyMatch(hider -> hider.getWorld().equals(scanEffect.origin.getWorld())
+                                && hider.getLocation().distance(scanEffect.origin) <= radius);
+            }
+            if (scanEffect.age >= settings.scanResultDelayTicks()) {
+                Player owner = Bukkit.getPlayer(scanEffect.owner);
+                if (owner != null) {
+                    owner.sendMessage(scanEffect.caught
+                            ? Component.text("扫描范围内发现躲藏者。", NamedTextColor.RED)
+                            : Component.text("扫描范围内没有发现躲藏者。", NamedTextColor.GREEN));
+                }
+                scanEffect.display.remove();
                 iterator.remove();
             }
         }
@@ -1364,12 +1525,39 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private Component statusLine(GamePlayer state) {
-        NamedTextColor roleColor = state.role == Role.HIDER ? NamedTextColor.GREEN : NamedTextColor.RED;
-        return Component.text(roleName(state.role), roleColor)
-                .append(Component.text("  HP ", NamedTextColor.GRAY))
-                .append(Component.text(state.hp + "/" + settings.maxHp(), NamedTextColor.RED))
-                .append(Component.text("  MP ", NamedTextColor.GRAY))
-                .append(Component.text(state.mp + "/" + settings.maxMp(), NamedTextColor.AQUA));
+        int hpBars = clampedBarIndex(state.hp, settings.maxHp(), 40);
+        int mpBars = clampedBarIndex(state.mp, settings.maxMp(), 40);
+        int hpText = Math.max(0, Math.min(5, (int) Math.ceil(state.hp * 5.0 / settings.maxHp())));
+        int mpText = Math.max(0, Math.min(100, (int) Math.round(state.mp * 100.0 / settings.maxMp())));
+        TextColor uiColor = TextColor.color(0x4e5c24);
+        return Component.text("", NamedTextColor.WHITE).font(PLAYER_UI_FONT)
+                .append(uiText("\uEF03\uE0A1\uEF04", uiColor))
+                .append(uiText("\uEF03" + hpBarGlyph(hpBars) + "\uEF04", uiColor))
+                .append(uiText("\uEF07HP " + hpText + "/5\uEF08", NamedTextColor.WHITE))
+                .append(uiText("\uEF01\uE001\uEF02", uiColor))
+                .append(uiText("\uEF01" + mpBarGlyph(mpBars) + "\uEF02", uiColor))
+                .append(uiText("\uEF05MP " + mpText + "/100\uEF06", NamedTextColor.WHITE));
+    }
+
+    private Component uiText(String text, TextColor color) {
+        return Component.text(text).font(PLAYER_UI_FONT).color(color);
+    }
+
+    private int clampedBarIndex(int value, int max, int steps) {
+        if (max <= 0) return 0;
+        return Math.max(0, Math.min(steps - 1, (int) Math.ceil(value * steps / (double) max) - 1));
+    }
+
+    private String mpBarGlyph(int index) {
+        return String.valueOf((char) (0xE001 + index));
+    }
+
+    private String hpBarGlyph(int index) {
+        return String.valueOf((char) (0xE0B1 + index));
+    }
+
+    private Component systemGlyph(String glyph) {
+        return Component.text(glyph, NamedTextColor.WHITE).font(SYSTEM_FONT);
     }
 
     private void showTitle(Player player, Component title, Component subtitle, int fadeInTicks, int stayTicks, int fadeOutTicks) {
@@ -1382,21 +1570,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                         Duration.ofMillis(fadeOutTicks * 50L)
                 )
         ));
-    }
-
-    private int abilityCustomModelData(String ability) {
-        return switch (ability) {
-            case "rotate_left", "rotate_right" -> 1;
-            case "disguise" -> 2;
-            case "release" -> 3;
-            case "rotation_lock" -> 4;
-            case "decoy" -> 5;
-            case "fly_hider" -> 6;
-            case "attack_bullet" -> 7;
-            case "scan" -> 8;
-            case "fly_seeker" -> 9;
-            default -> 0;
-        };
     }
 
     private void joinScoreboardTeam(Player player, Role role) {
@@ -1448,7 +1621,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         int seconds = Math.max(0, (remainingTicks - stage.remainingTicks()) / 20);
         Bukkit.broadcast(Component.text("下一次缩圈将在 " + seconds + " 秒后开始，绿色粒子标出了下一安全区。", NamedTextColor.YELLOW));
         for (Player player : Bukkit.getOnlinePlayers()) {
-            showTitle(player, Component.text("即将缩圈", NamedTextColor.YELLOW), Component.text("绿色粒子标出了下一安全区", NamedTextColor.GREEN), 10, 70, 20);
+            showTitle(player, systemGlyph(SYSTEM_WORLDBORDER_WARNING), Component.empty(), 10, 70, 20);
             player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.0f);
         }
     }
@@ -1876,6 +2049,20 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             this.owner = owner;
             this.display = display;
             this.velocity = velocity;
+        }
+    }
+
+    private static final class ScanEffect {
+        private final UUID owner;
+        private final ItemDisplay display;
+        private final Location origin;
+        private int age;
+        private boolean caught;
+
+        private ScanEffect(UUID owner, ItemDisplay display, Location origin) {
+            this.owner = owner;
+            this.display = display;
+            this.origin = origin;
         }
     }
 
