@@ -39,7 +39,9 @@ import org.bukkit.entity.Snowball;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
@@ -71,7 +73,6 @@ import org.joml.Vector3f;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -96,6 +97,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private static final String SYSTEM_START_SEEKER = "\uE006";
     private static final String SYSTEM_START_HIDER = "\uE007";
     private static final double SEEKER_JAIL_HORIZONTAL_RADIUS = 5.0;
+    private static final int BORDER_STAGE_SECONDS = 60;
+    private static final int[] ORIGINAL_BORDER_STAGE_TICKS = {10800, 8400, 6000, 3600};
+    private static final double[] ORIGINAL_BORDER_STAGE_PROGRESS = {38.0 / 88.0, 53.0 / 88.0, 68.0 / 88.0, 1.0};
     private final Map<UUID, GamePlayer> players = new HashMap<>();
     private final List<Decoy> decoys = new ArrayList<>();
     private final Map<UUID, DecoyProjectile> decoyProjectiles = new HashMap<>();
@@ -133,6 +137,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         Bukkit.getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(getCommand("has"), "Command has is missing from plugin.yml").setExecutor(this);
         Objects.requireNonNull(getCommand("has"), "Command has is missing from plugin.yml").setTabCompleter(this);
+        applyIdleStateToArenaPlayers();
     }
 
     @Override
@@ -498,6 +503,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         phase = GamePhase.RUNNING;
         bossBar = Bukkit.createBossBar("躲猫猫 10:00", BarColor.GREEN, BarStyle.SEGMENTED_20);
         bossBar.setProgress(1.0);
+        for (Player player : online) {
+            clearIdleState(player);
+        }
 
         Collections.shuffle(online);
         int seekerCount = online.size() == 1 ? 1 : Math.min(settings.seekerCount(), online.size() - 1);
@@ -519,6 +527,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void setupPlayer(Player player, GamePlayer state, Location spawn) {
+        applyGameState(player, false);
         player.teleport(spawn);
         player.setGameMode(GameMode.ADVENTURE);
         player.getInventory().clear();
@@ -567,6 +576,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         for (GamePlayer state : players.values()) {
             Player player = Bukkit.getPlayer(state.uuid);
             if (player == null) continue;
+            applyGameState(player, false);
             state.hp = Math.min(settings.maxHp(), state.hp + settings.hpRegenPerTick());
             state.mp = Math.min(settings.maxMp(), state.mp + settings.mpRegenPerTick());
             tickSeekerStandby(player, state, spawn);
@@ -751,6 +761,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         jailCellOpenTicks = -1;
         phase = GamePhase.IDLE;
         remainingTicks = 0;
+        applyIdleStateToArenaPlayers();
         if (announce) Bukkit.broadcast(Component.text("躲猫猫已停止。", NamedTextColor.YELLOW));
     }
 
@@ -1117,12 +1128,35 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (!(event.getEntity() instanceof Player player)) return;
         GamePlayer state = players.get(player.getUniqueId());
         if (state == null) return;
+        if (event instanceof EntityDamageByEntityEvent byEntityEvent && isPreReleaseSeekerAttack(byEntityEvent)) {
+            event.setCancelled(true);
+            return;
+        }
         event.setCancelled(true);
         damagePlayer(player, state, customDamageFromVanilla(event));
     }
 
+    @EventHandler
+    public void onFoodLevelChange(FoodLevelChangeEvent event) {
+        if (!(event.getEntity() instanceof Player player)) return;
+        if (phase == GamePhase.RUNNING && !players.containsKey(player.getUniqueId()) && !waitingSpectators.contains(player.getUniqueId())) {
+            return;
+        }
+        if (phase == GamePhase.IDLE && !isInArenaWorld(player)) return;
+        event.setCancelled(true);
+        player.setFoodLevel(20);
+        player.setSaturation(20f);
+    }
+
     private int customDamageFromVanilla(EntityDamageEvent event) {
         return settings.damagePerHit();
+    }
+
+    private boolean isPreReleaseSeekerAttack(EntityDamageByEntityEvent event) {
+        if (phase != GamePhase.RUNNING || remainingTicks <= settings.seekerReleaseAt()) return false;
+        if (!(event.getDamager() instanceof Player attacker)) return false;
+        GamePlayer attackerState = players.get(attacker.getUniqueId());
+        return attackerState != null && attackerState.role == Role.SEEKER;
     }
 
     private void damagePlayer(Player player, GamePlayer state, int damage) {
@@ -1468,9 +1502,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         GamePlayer state = players.get(event.getPlayer().getUniqueId());
         if (bossBar != null && state != null) {
             bossBar.addPlayer(event.getPlayer());
+            applyGameState(event.getPlayer(), false);
             ensureLoadout(event.getPlayer(), state.role);
         } else if (phase == GamePhase.RUNNING) {
             setupWaitingSpectator(event.getPlayer());
+        } else if (isInArenaWorld(event.getPlayer())) {
+            applyIdleState(event.getPlayer());
         }
     }
 
@@ -1503,6 +1540,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.removePotionEffect(PotionEffectType.INVISIBILITY);
         player.removePotionEffect(PotionEffectType.BLINDNESS);
         player.removePotionEffect(PotionEffectType.SLOWNESS);
+        player.removePotionEffect(PotionEffectType.SATURATION);
+        player.setInvulnerable(false);
         clearScoreboardTeam(player);
         removeAbilityItems(player.getInventory());
     }
@@ -1530,6 +1569,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void setupWaitingSpectator(Player player) {
         waitingSpectators.add(player.getUniqueId());
+        applyGameState(player, true);
         player.teleport(getArenaSpawn());
         player.setGameMode(GameMode.SPECTATOR);
         player.removePotionEffect(PotionEffectType.INVISIBILITY);
@@ -1546,9 +1586,40 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (player == null) continue;
             player.teleport(getArenaSpawn());
             player.setGameMode(GameMode.ADVENTURE);
+            applyIdleState(player);
             player.sendMessage(Component.text("本局躲猫猫已结束，下一局开始时你会加入游戏。", NamedTextColor.GREEN));
         }
         waitingSpectators.clear();
+    }
+
+    private void applyIdleStateToArenaPlayers() {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (isInArenaWorld(player)) applyIdleState(player);
+        }
+    }
+
+    private boolean isInArenaWorld(Player player) {
+        World world = getArenaSpawn().getWorld();
+        return world != null && player.getWorld().equals(world);
+    }
+
+    private void applyIdleState(Player player) {
+        player.setInvulnerable(true);
+        player.setFoodLevel(20);
+        player.setSaturation(20f);
+        player.addPotionEffect(new PotionEffect(PotionEffectType.SATURATION, 220, 0, false, false, false));
+    }
+
+    private void clearIdleState(Player player) {
+        player.setInvulnerable(false);
+        player.removePotionEffect(PotionEffectType.SATURATION);
+    }
+
+    private void applyGameState(Player player, boolean invulnerable) {
+        player.setInvulnerable(invulnerable);
+        player.setFoodLevel(20);
+        player.setSaturation(20f);
+        player.addPotionEffect(new PotionEffect(PotionEffectType.SATURATION, 220, 0, false, false, false));
     }
 
     private String getAbility(ItemStack item) {
@@ -1883,6 +1954,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private GameSettings loadSettings() {
         int durationTicks = positiveInt("game.durationTicks");
         int seekerReleaseDelayTicks = nonNegativeInt("game.seekerReleaseDelayTicks");
+        double borderInitialWidth = positiveDoubleWithFallback("worldBorder.initialWidth", "worldBorder.initialSize");
+        double borderInitialDepth = positiveDoubleWithFallback("worldBorder.initialDepth", "worldBorder.initialSize");
+        double borderFinalWidth = loadBorderFinalDimension("worldBorder.finalWidth", "worldBorder.finalSize", "width", borderInitialWidth * 40.0 / 128.0);
+        double borderFinalDepth = loadBorderFinalDimension("worldBorder.finalDepth", "worldBorder.finalSize", "depth", borderInitialDepth * 40.0 / 128.0);
         return new GameSettings(
                 durationTicks,
                 Math.max(1, getConfig().getInt("game.seekerCount")),
@@ -1924,8 +1999,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 nonNegativeInt("abilities.scan.mp"),
                 positiveDouble("abilities.scan.radius"),
                 nonNegativeLong("abilities.scan.resultDelayTicks"),
-                positiveDoubleWithFallback("worldBorder.initialWidth", "worldBorder.initialSize"),
-                positiveDoubleWithFallback("worldBorder.initialDepth", "worldBorder.initialSize"),
+                borderInitialWidth,
+                borderInitialDepth,
                 positiveDouble("worldBorder.resetSize"),
                 nonNegativeDouble("worldBorder.damageBuffer"),
                 nonNegativeInt("worldBorder.warningTicks"),
@@ -1935,27 +2010,38 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 positiveDouble("worldBorder.particleSpacing"),
                 positiveDouble("worldBorder.particleViewDistance"),
                 nonNegativeInt("worldBorder.particleVerticalHalfRange"),
-                loadBorderStages()
+                generateBorderStages(borderInitialWidth, borderInitialDepth, borderFinalWidth, borderFinalDepth)
         );
     }
 
-    private List<BorderStage> loadBorderStages() {
-        List<BorderStage> stages = new ArrayList<>();
-        for (Map<?, ?> map : getConfig().getMapList("worldBorder.stages")) {
-            Object remainingTicks = map.get("remainingTicks");
-            Object size = map.get("size");
-            Object width = map.get("width");
-            Object depth = map.get("depth");
-            Object seconds = map.get("seconds");
-            if (remainingTicks instanceof Number tickNumber) {
-                double fallbackSize = size instanceof Number sizeNumber ? sizeNumber.doubleValue() : 1.0;
-                double widthValue = width instanceof Number widthNumber ? widthNumber.doubleValue() : fallbackSize;
-                double depthValue = depth instanceof Number depthNumber ? depthNumber.doubleValue() : fallbackSize;
-                long secondsValue = seconds instanceof Number secondsNumber ? Math.max(0L, secondsNumber.longValue()) : 3L;
-                stages.add(new BorderStage(Math.max(0, tickNumber.intValue()), Math.max(1.0, widthValue), Math.max(1.0, depthValue), secondsValue));
-            }
+    private double loadBorderFinalDimension(String path, String fallbackPath, String stageKey, double fallbackValue) {
+        if (getConfig().contains(path)) return positiveDouble(path);
+        if (getConfig().contains(fallbackPath)) return positiveDouble(fallbackPath);
+        List<Map<?, ?>> legacyStages = getConfig().getMapList("worldBorder.stages");
+        if (!legacyStages.isEmpty()) {
+            Map<?, ?> lastStage = legacyStages.get(legacyStages.size() - 1);
+            Object exact = lastStage.get(stageKey);
+            if (exact instanceof Number number) return Math.max(1.0, number.doubleValue());
+            Object size = lastStage.get("size");
+            if (size instanceof Number number) return Math.max(1.0, number.doubleValue());
         }
-        stages.sort(Comparator.comparingInt(BorderStage::remainingTicks).reversed());
+        return Math.max(1.0, fallbackValue);
+    }
+
+    private List<BorderStage> generateBorderStages(double initialWidth, double initialDepth, double finalWidth, double finalDepth) {
+        List<BorderStage> stages = new ArrayList<>();
+        double widthDelta = Math.max(0.0, initialWidth - finalWidth);
+        double depthDelta = Math.max(0.0, initialDepth - finalDepth);
+        for (int i = 0; i < ORIGINAL_BORDER_STAGE_TICKS.length; i++) {
+            double progress = ORIGINAL_BORDER_STAGE_PROGRESS[i];
+            double stageWidth = i == ORIGINAL_BORDER_STAGE_TICKS.length - 1
+                    ? finalWidth
+                    : Math.max(finalWidth, initialWidth - widthDelta * progress);
+            double stageDepth = i == ORIGINAL_BORDER_STAGE_TICKS.length - 1
+                    ? finalDepth
+                    : Math.max(finalDepth, initialDepth - depthDelta * progress);
+            stages.add(new BorderStage(ORIGINAL_BORDER_STAGE_TICKS[i], stageWidth, stageDepth, BORDER_STAGE_SECONDS));
+        }
         return List.copyOf(stages);
     }
 
