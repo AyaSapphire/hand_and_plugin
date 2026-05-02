@@ -224,7 +224,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         sender.sendMessage("/has status - 查看当前游戏和关键设置");
         sender.sendMessage("/has menu - 打开管理员菜单");
         sender.sendMessage("/has reload - 重载 config.yml");
-        sender.sendMessage("/has preset list|select|create|delete|info - 管理地图预设");
+        sender.sendMessage("/has preset list|select|create|delete|info - 管理数字地图预设");
         sender.sendMessage("/has settings list|get|set|reset - 查看和调整玩法设置");
         sender.sendMessage("/has blacklist list|add|remove - 查看和调整伪装黑名单");
     }
@@ -248,6 +248,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void ensureConfigDefaults() {
         getConfig().options().copyDefaults(true);
         migrateLegacyPresetConfigIfNeeded();
+        migratePresetKeysToNumericIfNeeded();
         loadPresetState();
         saveConfig();
     }
@@ -321,7 +322,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             return;
         }
         switch (args[1].toLowerCase(Locale.ROOT)) {
-            case "list" -> sender.sendMessage("可用预设: " + String.join(", ", presetKeys()));
+            case "list" -> sender.sendMessage("可用预设: " + String.join(", ", presetStatusSummaries()));
             case "info" -> sender.sendMessage("当前编辑预设: " + currentPresetLabel()
                     + " | 出生点: " + arenaSpawnSummary()
                     + " | 边界: " + borderStatusSummary());
@@ -331,7 +332,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                     return;
                 }
                 if (args.length < 3) {
-                    sender.sendMessage("/has preset select <name>");
+                    sender.sendMessage("/has preset select <id>");
                     return;
                 }
                 if (!selectPreset(args[2])) {
@@ -345,16 +346,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                     sender.sendMessage("游戏进行中时不能创建预设。");
                     return;
                 }
-                if (args.length < 3) {
-                    sender.sendMessage("/has preset create <name>");
-                    return;
-                }
-                String created = createPreset(args[2]);
+                String created = createNextPreset();
                 if (created == null) {
-                    sender.sendMessage("预设名只能使用字母、数字、下划线或短横线，且不能重复。");
+                    sender.sendMessage("创建预设失败。");
                     return;
                 }
-                sender.sendMessage("已创建并切换到预设: " + created);
+                sender.sendMessage("已创建并切换到预设 #" + created + "。它会复制当前预设。");
             }
             case "delete" -> {
                 if (phase == GamePhase.RUNNING) {
@@ -362,15 +359,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                     return;
                 }
                 if (args.length < 3) {
-                    sender.sendMessage("/has preset delete <name>");
+                    sender.sendMessage("/has preset delete <id>");
                     return;
                 }
                 String deleted = deletePreset(args[2]);
                 if (deleted == null) {
-                    sender.sendMessage("无法删除该预设。至少保留一个预设，且名字必须存在。");
+                    sender.sendMessage("无法删除该预设。至少保留一个预设，且编号必须存在。");
                     return;
                 }
-                sender.sendMessage("已删除预设: " + deleted + "，当前预设: " + currentPresetLabel());
+                sender.sendMessage("已删除预设 #" + deleted + "，当前预设: " + currentPresetLabel());
             }
             default -> sender.sendMessage("/has preset <list|select|create|delete|info>");
         }
@@ -766,7 +763,14 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
 
         stopGame(false);
-        List<ArenaPreset> availablePresets = new ArrayList<>(presets.values());
+        List<ArenaPreset> availablePresets = presets.values().stream()
+                .filter(ArenaPreset::enabled)
+                .sorted((left, right) -> Integer.compare(Integer.parseInt(left.key()), Integer.parseInt(right.key())))
+                .toList();
+        if (availablePresets.isEmpty()) {
+            sender.sendMessage("当前没有启用中的地图预设。");
+            return;
+        }
         currentMatchPreset = availablePresets.get(ThreadLocalRandom.current().nextInt(availablePresets.size()));
         settings = loadSettings(currentMatchPreset);
         Location spawn = getArenaSpawn();
@@ -793,7 +797,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
         setupWorldBorder(spawn);
         spawnJailCell(spawn);
-        Bukkit.broadcast(Component.text("本局预设: " + currentMatchPreset.key(), NamedTextColor.YELLOW));
+        Bukkit.broadcast(Component.text("本局预设: #" + currentMatchPreset.key(), NamedTextColor.YELLOW));
         Bukkit.broadcast(Component.text("躲猫猫开始！前 30 秒寻找者等待，躲藏者快藏好。", NamedTextColor.GOLD));
         gameTask = Bukkit.getScheduler().runTaskTimer(this, this::tickGame, 1L, 1L);
     }
@@ -2197,6 +2201,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             Player player = Bukkit.getPlayer(state.uuid);
             if (player == null || !player.getWorld().equals(getArenaSpawn().getWorld())) continue;
             Location loc = player.getLocation();
+            if (state.role == Role.SEEKER) {
+                state.borderDamageTicks = 0;
+                continue;
+            }
             if (rectangle.contains(loc.getX(), loc.getZ())) {
                 state.borderDamageTicks = 0;
                 continue;
@@ -2356,11 +2364,52 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     String currentPresetLabel() {
         ArenaPreset preset = editingPreset();
-        return preset == null ? "default" : preset.key();
+        return preset == null ? "1" : preset.key();
+    }
+
+    boolean currentPresetEnabled() {
+        ArenaPreset preset = editingPreset();
+        return preset == null || preset.enabled();
     }
 
     List<String> presetKeys() {
-        return List.copyOf(presets.keySet());
+        return presets.keySet().stream()
+                .sorted((left, right) -> Integer.compare(Integer.parseInt(left), Integer.parseInt(right)))
+                .toList();
+    }
+
+    List<PresetMenuEntry> presetMenuEntries() {
+        return presetKeys().stream()
+                .map(key -> {
+                    ArenaPreset preset = presets.get(key);
+                    return new PresetMenuEntry(
+                            key,
+                            preset != null && preset.enabled(),
+                            key.equals(currentPresetLabel()),
+                            preset == null ? "?" : preset.spawn().getWorld().getName(),
+                            preset == null ? 0 : Math.round(preset.initialBorder().width()),
+                            preset == null ? 0 : Math.round(preset.initialBorder().depth()),
+                            preset == null ? 0 : Math.round(preset.finalBorder().width()),
+                            preset == null ? 0 : Math.round(preset.finalBorder().depth())
+                    );
+                })
+                .toList();
+    }
+
+    List<String> presetStatusSummaries() {
+        return presetMenuEntries().stream()
+                .map(entry -> "#" + entry.id() + (entry.enabled() ? "" : "(禁用)") + (entry.selected() ? "*" : ""))
+                .toList();
+    }
+
+    boolean cyclePreset(int delta) {
+        if (presets.isEmpty()) return false;
+        List<String> keys = presetKeys();
+        int currentIndex = Math.max(0, keys.indexOf(currentPresetLabel()));
+        int nextIndex = Math.floorMod(currentIndex + delta, keys.size());
+        String nextKey = keys.get(nextIndex);
+        if (nextKey.equals(currentPresetLabel())) return false;
+        return selectPreset(nextKey);
     }
 
     boolean selectPreset(String rawKey) {
@@ -2372,12 +2421,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return true;
     }
 
-    String createPreset(String rawKey) {
-        String key = normalizePresetKey(rawKey);
-        if (key == null || presets.containsKey(key)) return null;
+    String createNextPreset() {
+        String key = nextPresetId();
         ArenaPreset base = editingPreset();
         if (base == null) return null;
-        writePreset(key, base.spawn(), base.initialBorder(), base.finalBorder());
+        writePreset(key, base.spawn(), base.initialBorder(), base.finalBorder(), true);
         getConfig().set("editor.selectedPreset", key);
         saveAndReloadRuntimeConfig();
         return key;
@@ -2388,11 +2436,26 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (key == null || !presets.containsKey(key) || presets.size() <= 1) return null;
         getConfig().set("presets." + key, null);
         if (key.equals(selectedPresetKey)) {
-            selectedPresetKey = presets.keySet().stream().filter(existing -> !existing.equals(key)).findFirst().orElse("default");
+            selectedPresetKey = presetKeys().stream().filter(existing -> !existing.equals(key)).findFirst().orElse("1");
             getConfig().set("editor.selectedPreset", selectedPresetKey);
         }
         saveAndReloadRuntimeConfig();
         return key;
+    }
+
+    TogglePresetResult togglePresetEnabled(String rawKey) {
+        String key = normalizePresetKey(rawKey);
+        ArenaPreset preset = key == null ? null : presets.get(key);
+        if (preset == null) {
+            return new TogglePresetResult(false, false, "未找到预设 #" + rawKey + "。");
+        }
+        if (preset.enabled() && enabledPresetCount() <= 1) {
+            return new TogglePresetResult(false, true, "至少要保留一个启用中的预设。");
+        }
+        writePreset(key, preset.spawn(), preset.initialBorder(), preset.finalBorder(), !preset.enabled());
+        saveAndReloadRuntimeConfig();
+        boolean enabledNow = presets.get(key).enabled();
+        return new TogglePresetResult(true, enabledNow, "预设 #" + key + (enabledNow ? " 已启用。" : " 已禁用。"));
     }
 
     private Location getArenaSpawn() {
@@ -2420,7 +2483,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             }
         }
         if (presets.isEmpty()) {
-            ArenaPreset fallback = fallbackPreset("default");
+            ArenaPreset fallback = fallbackPreset("1");
             presets.put(fallback.key(), fallback);
         }
         String configuredKey = getConfig().getString("editor.selectedPreset", selectedPresetKey);
@@ -2440,7 +2503,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         ArenaPreset preset = editingPreset();
         BorderRectangle initial = preset == null ? defaultInitialBorder(location) : preset.initialBorder();
         BorderRectangle fin = preset == null ? defaultFinalBorder(location, initial) : preset.finalBorder();
-        writePreset(currentPresetLabel(), location, initial, fin);
+        writePreset(currentPresetLabel(), location, initial, fin, preset == null || preset.enabled());
         saveAndReloadRuntimeConfig();
     }
 
@@ -2451,7 +2514,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private GameSettings loadSettings(ArenaPreset preset) {
         int durationTicks = positiveInt("game.durationTicks");
         int seekerReleaseDelayTicks = nonNegativeInt("game.seekerReleaseDelayTicks");
-        ArenaPreset resolvedPreset = preset == null ? fallbackPreset("default") : preset;
+        ArenaPreset resolvedPreset = preset == null ? fallbackPreset("1") : preset;
         double borderInitialWidth = resolvedPreset.initialBorder().width();
         double borderInitialDepth = resolvedPreset.initialBorder().depth();
         double borderFinalWidth = resolvedPreset.finalBorder().width();
@@ -2529,8 +2592,45 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 loadBorderFinalDimension("worldBorder.finalWidth", "worldBorder.finalSize", "width", initial.width()),
                 loadBorderFinalDimension("worldBorder.finalDepth", "worldBorder.finalSize", "depth", initial.depth())
         );
-        writePreset("default", spawn, initial, fin);
-        getConfig().set("editor.selectedPreset", "default");
+        writePreset("1", spawn, initial, fin, true);
+        getConfig().set("editor.selectedPreset", "1");
+    }
+
+    private void migratePresetKeysToNumericIfNeeded() {
+        ConfigurationSection presetsSection = getConfig().getConfigurationSection("presets");
+        if (presetsSection == null) return;
+        List<String> keys = new ArrayList<>(presetsSection.getKeys(false));
+        if (keys.isEmpty()) return;
+        boolean alreadyNumeric = keys.stream().allMatch(key -> key.matches("\\d+"));
+        if (alreadyNumeric) return;
+
+        Map<String, ConfigurationSection> snapshot = new LinkedHashMap<>();
+        for (String key : keys) {
+            ConfigurationSection section = presetsSection.getConfigurationSection(key);
+            if (section != null) snapshot.put(key, section);
+        }
+        String selected = getConfig().getString("editor.selectedPreset", keys.get(0));
+        getConfig().set("presets", null);
+
+        int nextId = 1;
+        String selectedReplacement = "1";
+        for (Map.Entry<String, ConfigurationSection> entry : snapshot.entrySet()) {
+            String newKey = String.valueOf(nextId++);
+            ConfigurationSection source = entry.getValue();
+            String path = "presets." + newKey;
+            if (source.getConfigurationSection("spawn") != null) {
+                getConfig().set(path + ".spawn", source.getConfigurationSection("spawn").getValues(true));
+            }
+            if (source.getConfigurationSection("initialBorder") != null) {
+                getConfig().set(path + ".initialBorder", source.getConfigurationSection("initialBorder").getValues(true));
+            }
+            if (source.getConfigurationSection("finalBorder") != null) {
+                getConfig().set(path + ".finalBorder", source.getConfigurationSection("finalBorder").getValues(true));
+            }
+            getConfig().set(path + ".enabled", source.getBoolean("enabled", true));
+            if (entry.getKey().equals(selected)) selectedReplacement = newKey;
+        }
+        getConfig().set("editor.selectedPreset", selectedReplacement);
     }
 
     private ArenaPreset currentArenaPreset() {
@@ -2544,14 +2644,25 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return presets.values().stream().findFirst().orElse(null);
     }
 
+    private String nextPresetId() {
+        return String.valueOf(presets.keySet().stream()
+                .mapToInt(key -> Integer.parseInt(key))
+                .max()
+                .orElse(0) + 1);
+    }
+
+    private long enabledPresetCount() {
+        return presets.values().stream().filter(ArenaPreset::enabled).count();
+    }
+
     private BorderRectangle configuredInitialBorder() {
         ArenaPreset preset = editingPreset();
-        return preset == null ? fallbackPreset("default").initialBorder() : preset.initialBorder();
+        return preset == null ? fallbackPreset("1").initialBorder() : preset.initialBorder();
     }
 
     private BorderRectangle configuredFinalBorder() {
         ArenaPreset preset = editingPreset();
-        return preset == null ? fallbackPreset("default").finalBorder() : preset.finalBorder();
+        return preset == null ? fallbackPreset("1").finalBorder() : preset.finalBorder();
     }
 
     private ArenaPreset loadPreset(String key, ConfigurationSection presetSection) {
@@ -2559,7 +2670,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (spawn == null) return null;
         BorderRectangle initial = loadPresetBorder(presetSection.getConfigurationSection("initialBorder"), spawn);
         BorderRectangle fin = loadPresetBorder(presetSection.getConfigurationSection("finalBorder"), spawn);
-        return new ArenaPreset(key, spawn, initial, fin);
+        return new ArenaPreset(key, spawn, initial, fin, presetSection.getBoolean("enabled", true));
     }
 
     private Location loadPresetSpawn(ConfigurationSection spawnSection) {
@@ -2589,7 +2700,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         Location spawn = loadLegacySpawnOrDefault();
         BorderRectangle initial = defaultInitialBorder(spawn);
         BorderRectangle fin = defaultFinalBorder(spawn, initial);
-        return new ArenaPreset(key, spawn, initial, fin);
+        return new ArenaPreset(key, spawn, initial, fin, true);
     }
 
     private Location loadLegacySpawnOrDefault() {
@@ -2628,7 +2739,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         );
     }
 
-    private void writePreset(String key, Location spawn, BorderRectangle initial, BorderRectangle fin) {
+    private void writePreset(String key, Location spawn, BorderRectangle initial, BorderRectangle fin, boolean enabled) {
         String path = "presets." + key;
         getConfig().set(path + ".spawn.world", spawn.getWorld().getName());
         getConfig().set(path + ".spawn.x", spawn.getX());
@@ -2638,6 +2749,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         getConfig().set(path + ".spawn.pitch", spawn.getPitch());
         saveBorderRectangle(path + ".initialBorder", initial);
         saveBorderRectangle(path + ".finalBorder", fin);
+        getConfig().set(path + ".enabled", enabled);
     }
 
     private void saveBorderRectangle(String path, BorderRectangle rectangle) {
@@ -2649,20 +2761,25 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private BorderSelectionResult saveConfiguredBorderFromCorners(String borderKey, Location first, Location second, NamedTextColor color, String label) {
         if (!first.getWorld().equals(second.getWorld())) {
-            return new BorderSelectionResult(false, "两个角点必须在同一个世界。", NamedTextColor.RED);
+            return new BorderSelectionResult(false, "两个角点必须在同一个世界。", NamedTextColor.RED, null);
         }
         ArenaPreset preset = editingPreset();
         if (preset == null || !preset.spawn().getWorld().equals(first.getWorld())) {
-            return new BorderSelectionResult(false, "角点必须与当前预设出生点在同一个世界。", NamedTextColor.RED);
+            return new BorderSelectionResult(false, "角点必须与当前预设出生点在同一个世界。", NamedTextColor.RED, null);
         }
         BorderRectangle rectangle = rectangleFromCorners(first, second);
         String path = "presets." + currentPresetLabel() + "." + borderKey;
         saveBorderRectangle(path, rectangle);
         saveAndReloadRuntimeConfig();
+        String warning = null;
+        if ("initialBorder".equals(borderKey) && !rectangle.contains(preset.spawn().getX(), preset.spawn().getZ())) {
+            warning = "警告: 当前预设出生点不在初始边界内，请确认这是否符合预期。";
+        }
         return new BorderSelectionResult(true,
                 "已保存当前预设的" + label + "边界: "
                         + Math.round(rectangle.width()) + " x " + Math.round(rectangle.depth()),
-                color);
+                color,
+                warning);
     }
 
     private BorderRectangle rectangleFromCorners(Location first, Location second) {
@@ -2682,7 +2799,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private String normalizePresetKey(String rawKey) {
         String key = rawKey.toLowerCase(Locale.ROOT).trim();
-        if (key.isEmpty() || !key.matches("[a-z0-9_-]+")) return null;
+        if (key.isEmpty() || !key.matches("\\d+")) return null;
         return key;
     }
 
@@ -2841,10 +2958,25 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private record BorderStage(int remainingTicks, double progress, long seconds) {
     }
 
-    record BorderSelectionResult(boolean completed, String message, NamedTextColor color) {
+    record BorderSelectionResult(boolean completed, String message, NamedTextColor color, String warningMessage) {
     }
 
-    private record ArenaPreset(String key, Location spawn, BorderRectangle initialBorder, BorderRectangle finalBorder) {
+    record TogglePresetResult(boolean changed, boolean enabled, String message) {
+    }
+
+    record PresetMenuEntry(
+            String id,
+            boolean enabled,
+            boolean selected,
+            String worldName,
+            long initialWidth,
+            long initialDepth,
+            long finalWidth,
+            long finalDepth
+    ) {
+    }
+
+    private record ArenaPreset(String key, Location spawn, BorderRectangle initialBorder, BorderRectangle finalBorder, boolean enabled) {
     }
 
     private record ResultSnapshot(List<Player> initialSeekers, List<Player> joinedSeekers, List<Player> hiders) {

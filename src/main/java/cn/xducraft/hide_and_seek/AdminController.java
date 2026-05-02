@@ -3,13 +3,14 @@ package cn.xducraft.hide_and_seek;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.GameMode;
+import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
-import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerGameModeChangeEvent;
@@ -36,6 +37,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 final class AdminController implements Listener {
+    private static final long LEGEND_COOLDOWN_MS = 5000L;
+
     private final Hide_and_seek plugin;
     private final AdminMenu menu;
     private final NamespacedKey adminToolKey;
@@ -43,6 +46,7 @@ final class AdminController implements Listener {
     private final Map<UUID, BukkitTask> previewTasks = new ConcurrentHashMap<>();
     private final Map<UUID, CornerSelection> initialCornerSelections = new ConcurrentHashMap<>();
     private final Map<UUID, CornerSelection> finalCornerSelections = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> legendShownAt = new ConcurrentHashMap<>();
 
     AdminController(Hide_and_seek plugin) {
         this.plugin = plugin;
@@ -89,6 +93,7 @@ final class AdminController implements Listener {
         plugin.applyIdleStateForOrdinaryPlayer(player);
         player.sendMessage(Component.text("你已离开管理员模式，并作为普通玩家加入本局。", NamedTextColor.GREEN));
         plugin.startGameFromAdmin(player);
+        refreshAllAdminTools();
     }
 
     @EventHandler
@@ -108,6 +113,7 @@ final class AdminController implements Listener {
         cancelPreview(event.getPlayer().getUniqueId());
         initialCornerSelections.remove(event.getPlayer().getUniqueId());
         finalCornerSelections.remove(event.getPlayer().getUniqueId());
+        legendShownAt.remove(event.getPlayer().getUniqueId());
     }
 
     @EventHandler
@@ -138,12 +144,17 @@ final class AdminController implements Listener {
         AdminTool tool = adminToolOf(event.getItem());
         if (tool == null) return;
 
+        Action action = event.getAction();
+        boolean leftClick = action == Action.LEFT_CLICK_AIR || action == Action.LEFT_CLICK_BLOCK;
+        boolean rightClick = action == Action.RIGHT_CLICK_AIR || action == Action.RIGHT_CLICK_BLOCK;
+        if (!leftClick && !rightClick) return;
+
         event.setCancelled(true);
         Player player = event.getPlayer();
         if (!isAdmin(player.getUniqueId())) {
             enterAdminMode(player, true);
         }
-        handleToolUse(player, tool);
+        handleToolUse(player, tool, leftClick);
     }
 
     @EventHandler
@@ -179,7 +190,7 @@ final class AdminController implements Listener {
         if (menu.isAdminMenu(top)) {
             event.setCancelled(true);
             if (event.getClickedInventory() == null || event.getRawSlot() >= top.getSize()) return;
-            handleHomeClick(player, event.getRawSlot());
+            handleMenuClick(player, event.getRawSlot());
             return;
         }
 
@@ -188,7 +199,7 @@ final class AdminController implements Listener {
         }
     }
 
-    private void handleHomeClick(Player player, int slot) {
+    private void handleMenuClick(Player player, int slot) {
         switch (slot) {
             case 2 -> plugin.adjustConfiguredSeekerCount(-2);
             case 3 -> plugin.adjustConfiguredSeekerCount(-1);
@@ -202,54 +213,101 @@ final class AdminController implements Listener {
         menu.open(player, AdminMenu.Page.HOME);
     }
 
-    private void handleToolUse(Player player, AdminTool tool) {
+    private void handleToolUse(Player player, AdminTool tool, boolean leftClick) {
         switch (tool) {
-            case START_GAME -> {
-                if (plugin.isGameRunning()) {
-                    feedback(player, "当前已有对局进行中。", NamedTextColor.RED);
-                    return;
-                }
-                player.closeInventory();
-                startGameAsPlayer(player);
-            }
-            case STOP_GAME -> {
-                if (!plugin.isGameRunning()) {
-                    feedback(player, "当前没有正在进行的对局。", NamedTextColor.GRAY);
-                    return;
-                }
-                plugin.stopGameFromAdmin();
-                feedback(player, "已停止当前对局。", NamedTextColor.RED);
-            }
+            case PRESET_SELECTOR -> handlePresetSelection(player, leftClick ? -1 : 1);
+            case PRESET_TOGGLE -> handlePresetToggle(player);
+            case PRESET_CREATE -> handlePresetCreate(player);
+            case PRESET_DELETE -> handlePresetDelete(player);
+            case START_OR_STOP_GAME -> handleStartOrStop(player);
             case SET_SPAWN -> {
                 plugin.setArenaSpawnFromAdmin(player);
                 startPreview(player);
-                feedback(player, "已将当前位置设为小游戏出生点。", NamedTextColor.YELLOW);
-                sendPreviewLegend(player);
+                refreshAllAdminTools();
+                feedback(player, "已设置当前预设 #" + plugin.currentPresetLabel() + " 的出生点。", NamedTextColor.YELLOW);
+                maybeSendPreviewLegend(player);
             }
-            case SET_INITIAL_CORNER -> {
-                if (!plugin.canUseBorderCorner(player.getLocation())) {
-                    feedback(player, "请先回到小游戏出生点所在世界。", NamedTextColor.RED);
-                    return;
-                }
-                handleCornerSelection(player, true);
-            }
-            case SET_FINAL_CORNER -> {
-                if (!plugin.canUseBorderCorner(player.getLocation())) {
-                    feedback(player, "请先回到小游戏出生点所在世界。", NamedTextColor.RED);
-                    return;
-                }
-                handleCornerSelection(player, false);
-            }
+            case SET_INITIAL_CORNER -> handleCornerSelection(player, true);
+            case SET_FINAL_CORNER -> handleCornerSelection(player, false);
             case PREVIEW_BORDERS -> {
                 startPreview(player);
-                feedback(player, "已开始预览边界，持续 10 秒。", NamedTextColor.AQUA);
-                sendPreviewLegend(player);
-            }
-            case OPEN_MENU -> {
-                click(player);
-                menu.open(player, AdminMenu.Page.HOME);
+                feedback(player, "已预览当前预设 #" + plugin.currentPresetLabel() + " 的边界。", NamedTextColor.AQUA);
+                maybeSendPreviewLegend(player);
             }
         }
+    }
+
+    private void handlePresetSelection(Player player, int delta) {
+        if (plugin.isGameRunning()) {
+            feedback(player, "游戏进行中时不能切换编辑预设。", NamedTextColor.RED);
+            return;
+        }
+        if (!plugin.cyclePreset(delta)) {
+            feedback(player, "当前只有这一个预设。", NamedTextColor.GRAY);
+            return;
+        }
+        startPreview(player);
+        refreshAllAdminTools();
+        feedback(player, "已切换到预设 #" + plugin.currentPresetLabel() + "。", NamedTextColor.LIGHT_PURPLE);
+        maybeSendPreviewLegend(player);
+    }
+
+    private void handlePresetToggle(Player player) {
+        if (plugin.isGameRunning()) {
+            feedback(player, "游戏进行中时不能修改预设启用状态。", NamedTextColor.RED);
+            return;
+        }
+        Hide_and_seek.TogglePresetResult result = plugin.togglePresetEnabled(plugin.currentPresetLabel());
+        refreshAllAdminTools();
+        feedback(player, result.message(), result.changed() ? NamedTextColor.GREEN : NamedTextColor.RED);
+    }
+
+    private void handlePresetCreate(Player player) {
+        if (plugin.isGameRunning()) {
+            feedback(player, "游戏进行中时不能新增预设。", NamedTextColor.RED);
+            return;
+        }
+        String created = plugin.createNextPreset();
+        if (created == null) {
+            feedback(player, "新增预设失败。", NamedTextColor.RED);
+            return;
+        }
+        startPreview(player);
+        refreshAllAdminTools();
+        feedback(player, "已新增预设 #" + created + "。", NamedTextColor.GREEN);
+        maybeSendPreviewLegend(player);
+    }
+
+    private void handlePresetDelete(Player player) {
+        if (plugin.isGameRunning()) {
+            feedback(player, "游戏进行中时不能删除预设。", NamedTextColor.RED);
+            return;
+        }
+        if (plugin.presetKeys().size() <= 1) {
+            feedback(player, "至少要保留一个预设。", NamedTextColor.RED);
+            return;
+        }
+        String deleting = plugin.currentPresetLabel();
+        String deleted = plugin.deletePreset(deleting);
+        if (deleted == null) {
+            feedback(player, "删除预设失败。", NamedTextColor.RED);
+            return;
+        }
+        startPreview(player);
+        refreshAllAdminTools();
+        feedback(player, "已删除预设 #" + deleted + "，当前为 #" + plugin.currentPresetLabel() + "。", NamedTextColor.RED);
+        maybeSendPreviewLegend(player);
+    }
+
+    private void handleStartOrStop(Player player) {
+        if (plugin.isGameRunning()) {
+            plugin.stopGameFromAdmin();
+            refreshAllAdminTools();
+            feedback(player, "已停止当前对局。", NamedTextColor.RED);
+            return;
+        }
+        player.closeInventory();
+        startGameAsPlayer(player);
     }
 
     private void enterAdminMode(Player player, boolean notify) {
@@ -275,6 +333,15 @@ final class AdminController implements Listener {
         PlayerInventory inventory = player.getInventory();
         for (AdminTool tool : AdminTool.values()) {
             inventory.setItem(tool.slot(), createToolItem(tool));
+        }
+    }
+
+    private void refreshAllAdminTools() {
+        for (UUID uuid : admins) {
+            Player admin = plugin.getServer().getPlayer(uuid);
+            if (admin != null && admin.isOnline()) {
+                ensureAdminTools(admin);
+            }
         }
     }
 
@@ -315,15 +382,24 @@ final class AdminController implements Listener {
     }
 
     private void handleCornerSelection(Player player, boolean initial) {
+        if (!plugin.canUseBorderCorner(player.getLocation())) {
+            feedback(player, "请先回到当前预设出生点所在世界。", NamedTextColor.RED);
+            return;
+        }
+
         Map<UUID, CornerSelection> selections = initial ? initialCornerSelections : finalCornerSelections;
         String presetKey = plugin.currentPresetLabel();
         CornerSelection existing = selections.get(player.getUniqueId());
-        if (existing == null || !existing.presetKey().equals(presetKey)
+        if (existing == null
+                || !existing.presetKey().equals(presetKey)
                 || !existing.location().getWorld().equals(player.getWorld())) {
             selections.put(player.getUniqueId(), new CornerSelection(presetKey, player.getLocation().clone()));
-            feedback(player,
-                    "已记录" + (initial ? "初始" : "最终") + "边界第一个角点，请移动到对角后再次右键。",
-                    initial ? NamedTextColor.YELLOW : NamedTextColor.GOLD);
+            feedback(
+                    player,
+                    "已记" + (initial ? "初始" : "最终") + "角点 1/2，到对角后再右键。",
+                    initial ? NamedTextColor.RED : NamedTextColor.GREEN
+            );
+            maybeSendPreviewLegend(player);
             return;
         }
 
@@ -331,13 +407,18 @@ final class AdminController implements Listener {
         Hide_and_seek.BorderSelectionResult result = initial
                 ? plugin.setConfiguredBorderInitialFromCorners(existing.location(), player.getLocation())
                 : plugin.setConfiguredBorderFinalFromCorners(existing.location(), player.getLocation());
-        if (result.completed()) {
-            startPreview(player);
+        if (!result.completed()) {
             feedback(player, result.message(), result.color());
-            sendPreviewLegend(player);
             return;
         }
+
+        startPreview(player);
+        refreshAllAdminTools();
         feedback(player, result.message(), result.color());
+        if (result.warningMessage() != null) {
+            player.sendMessage(Component.text(result.warningMessage(), NamedTextColor.YELLOW));
+        }
+        maybeSendPreviewLegend(player);
     }
 
     private void feedback(Player player, String message, NamedTextColor color) {
@@ -345,15 +426,19 @@ final class AdminController implements Listener {
         player.sendMessage(Component.text(message, color));
     }
 
-    private void sendPreviewLegend(Player player) {
+    private void maybeSendPreviewLegend(Player player) {
+        long now = System.currentTimeMillis();
+        Long lastShown = legendShownAt.get(player.getUniqueId());
+        if (lastShown != null && now - lastShown < LEGEND_COOLDOWN_MS) return;
+        legendShownAt.put(player.getUniqueId(), now);
         player.sendMessage(
-                Component.text("粒子说明: ", NamedTextColor.GRAY)
+                Component.text("粒子: ", NamedTextColor.GRAY)
                         .append(Component.text("红", NamedTextColor.RED))
-                        .append(Component.text(" = 初始边界  ", NamedTextColor.GRAY))
+                        .append(Component.text("=初始边界  ", NamedTextColor.GRAY))
                         .append(Component.text("绿", NamedTextColor.GREEN))
-                        .append(Component.text(" = 最终边界  ", NamedTextColor.GRAY))
+                        .append(Component.text("=最终边界  ", NamedTextColor.GRAY))
                         .append(Component.text("蓝", NamedTextColor.AQUA))
-                        .append(Component.text(" = 出生点", NamedTextColor.GRAY))
+                        .append(Component.text("=出生点", NamedTextColor.GRAY))
         );
     }
 
@@ -362,11 +447,11 @@ final class AdminController implements Listener {
     }
 
     private ItemStack createToolItem(AdminTool tool) {
-        ItemStack item = new ItemStack(tool.material());
+        ItemStack item = new ItemStack(tool.material(this));
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(Component.text(tool.displayName(), tool.color()));
+        meta.displayName(Component.text(tool.displayName(this), tool.color(this)));
         List<Component> lore = new ArrayList<>();
-        for (String line : tool.lore()) {
+        for (String line : tool.lore(this)) {
             lore.add(Component.text(line, NamedTextColor.GRAY));
         }
         meta.lore(lore);
@@ -392,50 +477,96 @@ final class AdminController implements Listener {
     }
 
     private enum AdminTool {
-        START_GAME(2, Material.LIME_WOOL, "开始游戏", NamedTextColor.GREEN, List.of("右键后会离开管理员模式", "并作为普通玩家加入本局")),
-        STOP_GAME(3, Material.RED_WOOL, "结束游戏", NamedTextColor.RED, List.of("右键立即结束当前对局")),
-        SET_SPAWN(4, Material.RECOVERY_COMPASS, "设置出生点", NamedTextColor.YELLOW, List.of("右键将当前位置设为小游戏出生点")),
-        SET_INITIAL_CORNER(5, Material.RED_DYE, "设置初始边界", NamedTextColor.RED, List.of("第一次右键记录第一个角点", "第二次右键完成初始矩形")),
-        SET_FINAL_CORNER(6, Material.LIME_DYE, "设置最终边界", NamedTextColor.GOLD, List.of("第一次右键记录第一个角点", "第二次右键完成最终矩形")),
-        PREVIEW_BORDERS(7, Material.SPYGLASS, "预览边界", NamedTextColor.AQUA, List.of("右键显示出生点光柱", "并预览初始与最终边界 10 秒")),
-        OPEN_MENU(8, Material.NETHER_STAR, "寻找者设置", NamedTextColor.GOLD, List.of("右键打开单行设置栏", "只调整寻找者人数"));
+        PRESET_SELECTOR(0),
+        PRESET_TOGGLE(1),
+        PRESET_CREATE(2),
+        PRESET_DELETE(3),
+        START_OR_STOP_GAME(4),
+        SET_SPAWN(5),
+        SET_INITIAL_CORNER(6),
+        SET_FINAL_CORNER(7),
+        PREVIEW_BORDERS(8);
 
         private final int slot;
-        private final Material material;
-        private final String displayName;
-        private final NamedTextColor color;
-        private final List<String> lore;
 
-        AdminTool(int slot, Material material, String displayName, NamedTextColor color, List<String> lore) {
+        AdminTool(int slot) {
             this.slot = slot;
-            this.material = material;
-            this.displayName = displayName;
-            this.color = color;
-            this.lore = lore;
         }
 
         int slot() {
             return slot;
         }
 
-        Material material() {
-            return material;
+        Material material(AdminController controller) {
+            return switch (this) {
+                case PRESET_SELECTOR -> Material.PINK_WOOL;
+                case PRESET_TOGGLE -> controller.plugin.currentPresetEnabled() ? Material.LIME_WOOL : Material.RED_WOOL;
+                case PRESET_CREATE -> Material.LIME_DYE;
+                case PRESET_DELETE -> Material.RED_DYE;
+                case START_OR_STOP_GAME -> controller.plugin.isGameRunning() ? Material.RED_WOOL : Material.LIME_WOOL;
+                case SET_SPAWN -> Material.RECOVERY_COMPASS;
+                case SET_INITIAL_CORNER -> Material.RED_DYE;
+                case SET_FINAL_CORNER -> Material.LIME_DYE;
+                case PREVIEW_BORDERS -> Material.SPYGLASS;
+            };
         }
 
-        String displayName() {
-            return displayName;
+        String displayName(AdminController controller) {
+            return switch (this) {
+                case PRESET_SELECTOR -> "当前预设 #" + controller.plugin.currentPresetLabel();
+                case PRESET_TOGGLE -> controller.plugin.currentPresetEnabled() ? "当前预设已启用" : "当前预设已禁用";
+                case PRESET_CREATE -> "新增预设";
+                case PRESET_DELETE -> "删除当前预设";
+                case START_OR_STOP_GAME -> controller.plugin.isGameRunning() ? "结束游戏" : "开始游戏";
+                case SET_SPAWN -> "设置当前预设出生点";
+                case SET_INITIAL_CORNER -> "设置当前预设初始边界";
+                case SET_FINAL_CORNER -> "设置当前预设最终边界";
+                case PREVIEW_BORDERS -> "预览当前预设边界";
+            };
         }
 
-        NamedTextColor color() {
-            return color;
+        NamedTextColor color(AdminController controller) {
+            return switch (this) {
+                case PRESET_SELECTOR -> NamedTextColor.LIGHT_PURPLE;
+                case PRESET_TOGGLE -> controller.plugin.currentPresetEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED;
+                case PRESET_CREATE -> NamedTextColor.GREEN;
+                case PRESET_DELETE -> NamedTextColor.RED;
+                case START_OR_STOP_GAME -> controller.plugin.isGameRunning() ? NamedTextColor.RED : NamedTextColor.GREEN;
+                case SET_SPAWN -> NamedTextColor.YELLOW;
+                case SET_INITIAL_CORNER -> NamedTextColor.RED;
+                case SET_FINAL_CORNER -> NamedTextColor.GREEN;
+                case PREVIEW_BORDERS -> NamedTextColor.AQUA;
+            };
         }
 
-        List<String> lore() {
-            return lore;
+        List<String> lore(AdminController controller) {
+            return switch (this) {
+                case PRESET_SELECTOR -> List.of(
+                        "左键上一套，右键下一套",
+                        "正在编辑的预设固定为粉红色羊毛"
+                );
+                case PRESET_TOGGLE -> List.of(
+                        "右键切换当前预设启用状态",
+                        controller.plugin.currentPresetEnabled() ? "当前会参与随机选图" : "当前不会参与随机选图"
+                );
+                case PRESET_CREATE -> List.of("复制当前预设并自动切换到新预设");
+                case PRESET_DELETE -> List.of("删除当前编辑预设", "至少保留 1 个预设");
+                case START_OR_STOP_GAME -> List.of(
+                        controller.plugin.isGameRunning() ? "右键立即结束当前对局" : "右键后离开管理员模式并加入本局"
+                );
+                case SET_SPAWN -> List.of("将当前位置设为当前预设的出生点");
+                case SET_INITIAL_CORNER -> List.of("第一次记录角点，第二次完成初始矩形");
+                case SET_FINAL_CORNER -> List.of("第一次记录角点，第二次完成最终矩形");
+                case PREVIEW_BORDERS -> List.of("显示出生点与初始/最终边界预览");
+            };
         }
 
         boolean triggersPreviewAssist() {
-            return this == SET_SPAWN || this == SET_INITIAL_CORNER || this == SET_FINAL_CORNER || this == PREVIEW_BORDERS;
+            return this == PRESET_SELECTOR
+                    || this == SET_SPAWN
+                    || this == SET_INITIAL_CORNER
+                    || this == SET_FINAL_CORNER
+                    || this == PREVIEW_BORDERS;
         }
     }
 
