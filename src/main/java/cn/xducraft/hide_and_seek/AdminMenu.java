@@ -39,25 +39,11 @@ final class AdminMenu {
     }
 
     private Inventory buildHome() {
-        Inventory inventory = Bukkit.createInventory(new Holder(Page.HOME), 27, Component.text("管理员菜单", NamedTextColor.GOLD));
+        Inventory inventory = Bukkit.createInventory(new Holder(Page.HOME), 9, Component.text("寻找者设置", NamedTextColor.GOLD));
         fillFrame(inventory);
 
-        placeAdjuster(inventory, 2, namedItem(Material.PLAYER_HEAD, "寻找者数量", NamedTextColor.AQUA,
+        placeAdjuster(inventory, 2, namedItem(Material.PLAYER_HEAD, "寻找者人数", NamedTextColor.AQUA,
                 List.of("当前值: " + plugin.configuredSeekerCount())));
-
-        inventory.setItem(8, namedItem(Material.REPEATER, "重载配置", NamedTextColor.GREEN,
-                List.of("重新读取 config.yml")));
-        inventory.setItem(10, namedItem(Material.PAPER, "当前阶段", NamedTextColor.WHITE,
-                List.of(plugin.currentPhaseLabel())));
-        inventory.setItem(12, namedItem(Material.CLOCK, "剩余时间", NamedTextColor.WHITE,
-                List.of(plugin.remainingSeconds() + " 秒")));
-        inventory.setItem(14, namedItem(Material.RESPAWN_ANCHOR, "小游戏出生点", NamedTextColor.WHITE,
-                List.of(plugin.arenaSpawnSummary())));
-        inventory.setItem(16, namedItem(Material.RED_STAINED_GLASS, "边界概览", NamedTextColor.WHITE,
-                List.of(plugin.borderStatusSummary())));
-        inventory.setItem(22, namedItem(Material.NETHER_STAR, "快捷工具", NamedTextColor.GOLD,
-                List.of("开始/结束/设出生点/角点/预览",
-                        "都已放在你的快捷栏中")));
         return inventory;
     }
 

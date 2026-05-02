@@ -189,14 +189,11 @@ final class AdminController implements Listener {
             case 3 -> plugin.adjustConfiguredSeekerCount(-1);
             case 5 -> plugin.adjustConfiguredSeekerCount(1);
             case 6 -> plugin.adjustConfiguredSeekerCount(2);
-            case 8 -> {
-                plugin.reloadGameConfigFromAdmin();
-                feedback(player, "已重载配置。", NamedTextColor.GREEN);
-            }
             default -> {
                 return;
             }
         }
+        feedback(player, "寻找者人数已设为 " + plugin.configuredSeekerCount() + "。", NamedTextColor.AQUA);
         menu.open(player, AdminMenu.Page.HOME);
     }
 
@@ -222,6 +219,7 @@ final class AdminController implements Listener {
                 plugin.setArenaSpawnFromAdmin(player);
                 startPreview(player);
                 feedback(player, "已将当前位置设为小游戏出生点。", NamedTextColor.YELLOW);
+                sendPreviewLegend(player);
             }
             case SET_INITIAL_CORNER -> {
                 if (!plugin.canUseBorderCorner(player.getLocation())) {
@@ -231,6 +229,7 @@ final class AdminController implements Listener {
                 plugin.setConfiguredBorderInitialFromCorner(player.getLocation());
                 startPreview(player);
                 feedback(player, "已使用当前位置设置初始边界角点，并开始预览。", NamedTextColor.YELLOW);
+                sendPreviewLegend(player);
             }
             case SET_FINAL_CORNER -> {
                 if (!plugin.canUseBorderCorner(player.getLocation())) {
@@ -240,10 +239,12 @@ final class AdminController implements Listener {
                 plugin.setConfiguredBorderFinalFromCorner(player.getLocation());
                 startPreview(player);
                 feedback(player, "已使用当前位置设置最终边界角点，并开始预览。", NamedTextColor.GOLD);
+                sendPreviewLegend(player);
             }
             case PREVIEW_BORDERS -> {
                 startPreview(player);
                 feedback(player, "已开始预览边界，持续 10 秒。", NamedTextColor.AQUA);
+                sendPreviewLegend(player);
             }
             case OPEN_MENU -> {
                 click(player);
@@ -319,6 +320,18 @@ final class AdminController implements Listener {
         player.sendMessage(Component.text(message, color));
     }
 
+    private void sendPreviewLegend(Player player) {
+        player.sendMessage(
+                Component.text("粒子说明: ", NamedTextColor.GRAY)
+                        .append(Component.text("红", NamedTextColor.RED))
+                        .append(Component.text(" = 初始边界  ", NamedTextColor.GRAY))
+                        .append(Component.text("绿", NamedTextColor.GREEN))
+                        .append(Component.text(" = 最终边界  ", NamedTextColor.GRAY))
+                        .append(Component.text("蓝", NamedTextColor.AQUA))
+                        .append(Component.text(" = 出生点", NamedTextColor.GRAY))
+        );
+    }
+
     private void click(Player player) {
         player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1.1f);
     }
@@ -356,11 +369,11 @@ final class AdminController implements Listener {
     private enum AdminTool {
         START_GAME(2, Material.LIME_WOOL, "开始游戏", NamedTextColor.GREEN, List.of("右键后会离开管理员模式", "并作为普通玩家加入本局")),
         STOP_GAME(3, Material.RED_WOOL, "结束游戏", NamedTextColor.RED, List.of("右键立即结束当前对局")),
-        SET_SPAWN(4, Material.RESPAWN_ANCHOR, "设置出生点", NamedTextColor.YELLOW, List.of("右键将当前位置设为小游戏出生点")),
-        SET_INITIAL_CORNER(5, Material.RED_CONCRETE, "设置初始角点", NamedTextColor.RED, List.of("右键用当前位置设置初始边界", "会自动显示出生点和边界预览")),
-        SET_FINAL_CORNER(6, Material.ORANGE_CONCRETE, "设置最终角点", NamedTextColor.GOLD, List.of("右键用当前位置设置最终边界", "会自动显示出生点和边界预览")),
+        SET_SPAWN(4, Material.RECOVERY_COMPASS, "设置出生点", NamedTextColor.YELLOW, List.of("右键将当前位置设为小游戏出生点")),
+        SET_INITIAL_CORNER(5, Material.RED_DYE, "设置初始角点", NamedTextColor.RED, List.of("右键用当前位置设置初始边界", "会自动显示出生点和边界预览")),
+        SET_FINAL_CORNER(6, Material.LIME_DYE, "设置最终角点", NamedTextColor.GOLD, List.of("右键用当前位置设置最终边界", "会自动显示出生点和边界预览")),
         PREVIEW_BORDERS(7, Material.SPYGLASS, "预览边界", NamedTextColor.AQUA, List.of("右键显示出生点光柱", "并预览初始与最终边界 10 秒")),
-        OPEN_MENU(8, Material.NETHER_STAR, "管理员菜单", NamedTextColor.GOLD, List.of("右键打开精简管理员菜单", "可调整寻找者数量并查看状态"));
+        OPEN_MENU(8, Material.NETHER_STAR, "寻找者设置", NamedTextColor.GOLD, List.of("右键打开单行设置栏", "只调整寻找者人数"));
 
         private final int slot;
         private final Material material;
