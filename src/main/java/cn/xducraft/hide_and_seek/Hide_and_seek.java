@@ -117,6 +117,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private BukkitTask gameTask;
     private BossBar bossBar;
     private GamePhase phase = GamePhase.IDLE;
+    private AdminController adminController;
     private Location arenaSpawn;
     private BorderState borderState;
     private ItemDisplay jailCell;
@@ -135,6 +136,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         settings = loadSettings();
         loadSpawn();
         Bukkit.getPluginManager().registerEvents(this, this);
+        adminController = new AdminController(this);
+        Bukkit.getPluginManager().registerEvents(adminController, this);
         Objects.requireNonNull(getCommand("has"), "Command has is missing from plugin.yml").setExecutor(this);
         Objects.requireNonNull(getCommand("has"), "Command has is missing from plugin.yml").setTabCompleter(this);
         applyIdleStateToArenaPlayers();
@@ -172,6 +175,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 sender.sendMessage("已设置躲猫猫出生点。");
             }
             case "status" -> sendStatus(sender);
+            case "menu", "admin" -> {
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage("只有玩家可以打开管理员菜单。");
+                    return true;
+                }
+                adminController.openMenuCommand(player);
+            }
             case "reload" -> reloadGameConfig(sender);
             case "settings", "config" -> handleSettingsCommand(sender, args);
             case "blacklist" -> handleBlacklistCommand(sender, args);
@@ -191,7 +201,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
         if (args.length != 1) return List.of();
         String prefix = args[0].toLowerCase(Locale.ROOT);
-        return List.of("help", "start", "stop", "setspawn", "status", "reload", "settings", "blacklist").stream()
+        return List.of("help", "start", "stop", "setspawn", "status", "menu", "admin", "reload", "settings", "blacklist").stream()
                 .filter(option -> option.startsWith(prefix))
                 .toList();
     }
@@ -201,6 +211,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         sender.sendMessage("/has stop - 停止当前游戏并清理实体");
         sender.sendMessage("/has setspawn - 使用你当前位置作为竞技场出生点");
         sender.sendMessage("/has status - 查看当前游戏和关键设置");
+        sender.sendMessage("/has menu - 打开管理员菜单");
         sender.sendMessage("/has reload - 重载 config.yml");
         sender.sendMessage("/has settings list|get|set|reset - 查看和调整玩法设置");
         sender.sendMessage("/has blacklist list|add|remove - 查看和调整伪装黑名单");
@@ -375,6 +386,192 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         sender.sendMessage("已重置 " + path + " = " + value);
     }
 
+    boolean isGameRunning() {
+        return phase == GamePhase.RUNNING;
+    }
+
+    int configuredSeekerCount() {
+        return Math.max(1, getConfig().getInt("game.seekerCount"));
+    }
+
+    int configuredSeekerReleaseDelayTicks() {
+        return Math.max(0, getConfig().getInt("game.seekerReleaseDelayTicks"));
+    }
+
+    int configuredDurationTicks() {
+        return Math.max(20, getConfig().getInt("game.durationTicks"));
+    }
+
+    double configuredBorderInitialWidth() {
+        return positiveDoubleWithFallback("worldBorder.initialWidth", "worldBorder.initialSize");
+    }
+
+    double configuredBorderInitialDepth() {
+        return positiveDoubleWithFallback("worldBorder.initialDepth", "worldBorder.initialSize");
+    }
+
+    double configuredBorderFinalWidth() {
+        return loadBorderFinalDimension("worldBorder.finalWidth", "worldBorder.finalSize", "width", configuredBorderInitialWidth());
+    }
+
+    double configuredBorderFinalDepth() {
+        return loadBorderFinalDimension("worldBorder.finalDepth", "worldBorder.finalSize", "depth", configuredBorderInitialDepth());
+    }
+
+    void adjustConfiguredSeekerCount(int delta) {
+        setClampedIntConfigValue("game.seekerCount", configuredSeekerCount() + delta, 1, 64);
+    }
+
+    void adjustConfiguredSeekerReleaseDelayTicks(int delta) {
+        setClampedIntConfigValue("game.seekerReleaseDelayTicks", configuredSeekerReleaseDelayTicks() + delta, 0, configuredDurationTicks());
+    }
+
+    void adjustConfiguredDurationTicks(int delta) {
+        int duration = Math.max(20, configuredDurationTicks() + delta);
+        getConfig().set("game.durationTicks", duration);
+        if (configuredSeekerReleaseDelayTicks() > duration) {
+            getConfig().set("game.seekerReleaseDelayTicks", duration);
+        }
+        saveAndReloadRuntimeConfig();
+    }
+
+    void adjustConfiguredBorderInitialWidth(double delta) {
+        double initialWidth = Math.max(1.0, configuredBorderInitialWidth() + delta);
+        double finalWidth = Math.min(configuredBorderFinalWidth(), initialWidth);
+        getConfig().set("worldBorder.initialWidth", roundToOneDecimal(initialWidth));
+        getConfig().set("worldBorder.finalWidth", roundToOneDecimal(finalWidth));
+        saveAndReloadRuntimeConfig();
+    }
+
+    void adjustConfiguredBorderInitialDepth(double delta) {
+        double initialDepth = Math.max(1.0, configuredBorderInitialDepth() + delta);
+        double finalDepth = Math.min(configuredBorderFinalDepth(), initialDepth);
+        getConfig().set("worldBorder.initialDepth", roundToOneDecimal(initialDepth));
+        getConfig().set("worldBorder.finalDepth", roundToOneDecimal(finalDepth));
+        saveAndReloadRuntimeConfig();
+    }
+
+    void adjustConfiguredBorderFinalWidth(double delta) {
+        double finalWidth = Math.max(1.0, configuredBorderFinalWidth() + delta);
+        double initialWidth = Math.max(configuredBorderInitialWidth(), finalWidth);
+        getConfig().set("worldBorder.finalWidth", roundToOneDecimal(finalWidth));
+        getConfig().set("worldBorder.initialWidth", roundToOneDecimal(initialWidth));
+        saveAndReloadRuntimeConfig();
+    }
+
+    void adjustConfiguredBorderFinalDepth(double delta) {
+        double finalDepth = Math.max(1.0, configuredBorderFinalDepth() + delta);
+        double initialDepth = Math.max(configuredBorderInitialDepth(), finalDepth);
+        getConfig().set("worldBorder.finalDepth", roundToOneDecimal(finalDepth));
+        getConfig().set("worldBorder.initialDepth", roundToOneDecimal(initialDepth));
+        saveAndReloadRuntimeConfig();
+    }
+
+    void startGameFromAdmin(Player player) {
+        startGame(player);
+    }
+
+    void stopGameFromAdmin() {
+        stopGame(true);
+    }
+
+    void forceSeekerWin() {
+        if (phase == GamePhase.RUNNING) endGame(Role.SEEKER, "寻找者胜利！");
+    }
+
+    void forceHiderWin() {
+        if (phase == GamePhase.RUNNING) endGame(Role.HIDER, "躲藏者胜利！");
+    }
+
+    void setArenaSpawnFromAdmin(Player player) {
+        arenaSpawn = player.getLocation();
+        saveSpawn(arenaSpawn);
+    }
+
+    void reloadGameConfigFromAdmin() {
+        reloadConfig();
+        ensureConfigDefaults();
+        settings = loadSettings();
+        loadSpawn();
+    }
+
+    void removePlayerFromGameForAdmin(Player player) {
+        UUID uuid = player.getUniqueId();
+        if (waitingSpectators.remove(uuid)) {
+            if (bossBar != null) bossBar.removePlayer(player);
+            clearScoreboardTeam(player);
+            removeAbilityItems(player.getInventory());
+            return;
+        }
+
+        GamePlayer state = players.remove(uuid);
+        if (state == null) return;
+        if (bossBar != null) bossBar.removePlayer(player);
+        if (state.display != null) {
+            state.display.remove();
+            state.display = null;
+        }
+        player.removePotionEffect(PotionEffectType.INVISIBILITY);
+        clearScoreboardTeam(player);
+        removeAbilityItems(player.getInventory());
+        if (phase == GamePhase.RUNNING) checkWin();
+    }
+
+    void placePlayerIntoWaitingState(Player player) {
+        setupWaitingSpectator(player);
+    }
+
+    void applyIdleStateForOrdinaryPlayer(Player player) {
+        if (isInArenaWorld(player)) applyIdleState(player);
+    }
+
+    int currentHiderCount() {
+        return (int) players.values().stream().filter(state -> state.role == Role.HIDER).count();
+    }
+
+    int currentSeekerCount() {
+        return (int) players.values().stream().filter(state -> state.role == Role.SEEKER).count();
+    }
+
+    int currentAdminCount() {
+        return adminController == null ? 0 : adminController.adminCount();
+    }
+
+    String currentPhaseLabel() {
+        return phase == GamePhase.RUNNING ? "进行中" : "未开始";
+    }
+
+    int remainingSeconds() {
+        return Math.max(0, remainingTicks / 20);
+    }
+
+    String arenaSpawnSummary() {
+        Location spawn = getArenaSpawn();
+        return spawn.getWorld().getName() + " (" + Math.round(spawn.getX()) + ", " + Math.round(spawn.getY()) + ", " + Math.round(spawn.getZ()) + ")";
+    }
+
+    String borderStatusSummary() {
+        BorderRectangle rectangle = borderState == null
+                ? new BorderRectangle(getArenaSpawn().getX(), getArenaSpawn().getZ(), configuredBorderInitialWidth(), configuredBorderInitialDepth())
+                : borderState.current();
+        return (int) Math.round(rectangle.width()) + " x " + (int) Math.round(rectangle.depth());
+    }
+
+    private void setClampedIntConfigValue(String path, int value, int min, int max) {
+        getConfig().set(path, Math.max(min, Math.min(max, value)));
+        saveAndReloadRuntimeConfig();
+    }
+
+    private void saveAndReloadRuntimeConfig() {
+        saveConfig();
+        settings = loadSettings();
+        loadSpawn();
+    }
+
+    private double roundToOneDecimal(double value) {
+        return Math.round(value * 10.0) / 10.0;
+    }
+
     private Object parseConfigValue(Object template, String rawValue) {
         if (template instanceof Boolean) {
             if (rawValue.equalsIgnoreCase("true") || rawValue.equalsIgnoreCase("false")) {
@@ -491,7 +688,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             return;
         }
 
-        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
+        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers().stream()
+                .filter(player -> adminController == null || !adminController.isAdmin(player.getUniqueId()))
+                .toList());
         if (online.size() < 2) {
             sender.sendMessage("至少需要 2 名在线玩家才能开始游戏。");
             return;
