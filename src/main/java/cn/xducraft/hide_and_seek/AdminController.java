@@ -12,6 +12,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerGameModeChangeEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -154,7 +155,7 @@ final class AdminController implements Listener {
         if (!isAdmin(player.getUniqueId())) {
             enterAdminMode(player, true);
         }
-        handleToolUse(player, tool, leftClick);
+        handleToolUse(player, tool);
     }
 
     @EventHandler
@@ -190,7 +191,7 @@ final class AdminController implements Listener {
         if (menu.isAdminMenu(top)) {
             event.setCancelled(true);
             if (event.getClickedInventory() == null || event.getRawSlot() >= top.getSize()) return;
-            handleMenuClick(player, event.getRawSlot());
+            handleMenuClick(player, event.getRawSlot(), event.getClick(), top);
             return;
         }
 
@@ -199,7 +200,13 @@ final class AdminController implements Listener {
         }
     }
 
-    private void handleMenuClick(Player player, int slot) {
+    private void handleMenuClick(Player player, int slot, ClickType clickType, Inventory inventory) {
+        AdminMenu.Page page = menu.pageOf(inventory);
+        if (page == AdminMenu.Page.PRESETS) {
+            handlePresetMenuClick(player, slot, clickType, inventory);
+            return;
+        }
+
         switch (slot) {
             case 2 -> plugin.adjustConfiguredSeekerCount(-2);
             case 3 -> plugin.adjustConfiguredSeekerCount(-1);
@@ -213,13 +220,76 @@ final class AdminController implements Listener {
         menu.open(player, AdminMenu.Page.HOME);
     }
 
-    private void handleToolUse(Player player, AdminTool tool, boolean leftClick) {
+    private void handlePresetMenuClick(Player player, int slot, ClickType clickType, Inventory inventory) {
+        if (slot == 47) {
+            handlePresetCreate(player);
+            menu.open(player, AdminMenu.Page.PRESETS);
+            return;
+        }
+
+        String presetId = menu.presetIdAt(inventory, slot);
+        if (presetId == null) return;
+
+        if (clickType == ClickType.MIDDLE) {
+            handlePresetDelete(player, presetId);
+            menu.open(player, AdminMenu.Page.PRESETS);
+            return;
+        }
+
+        if (clickType.isRightClick()) {
+            if (plugin.isGameRunning()) {
+                feedback(player, "游戏进行中时不能修改预设启用状态。", NamedTextColor.RED);
+                return;
+            }
+            Hide_and_seek.TogglePresetResult result = plugin.togglePresetEnabled(presetId);
+            refreshAllAdminTools();
+            feedback(player, result.message(), result.changed() ? NamedTextColor.GREEN : NamedTextColor.RED);
+            menu.open(player, AdminMenu.Page.PRESETS);
+            return;
+        }
+
+        if (plugin.isGameRunning()) {
+            feedback(player, "游戏进行中时不能切换编辑预设。", NamedTextColor.RED);
+            return;
+        }
+        if (!plugin.selectPreset(presetId)) {
+            feedback(player, "切换到预设 #" + presetId + " 失败。", NamedTextColor.RED);
+            return;
+        }
+        startPreview(player);
+        refreshAllAdminTools();
+        feedback(player, "已切换到预设 #" + plugin.currentPresetLabel() + "。", NamedTextColor.LIGHT_PURPLE);
+        maybeSendPreviewLegend(player);
+        menu.open(player, AdminMenu.Page.PRESETS);
+    }
+
+    private void handleToolUse(Player player, AdminTool tool) {
         switch (tool) {
-            case PRESET_SELECTOR -> handlePresetSelection(player, leftClick ? -1 : 1);
-            case PRESET_TOGGLE -> handlePresetToggle(player);
-            case PRESET_CREATE -> handlePresetCreate(player);
-            case PRESET_DELETE -> handlePresetDelete(player);
-            case START_OR_STOP_GAME -> handleStartOrStop(player);
+            case START_GAME -> {
+                if (plugin.isGameRunning()) {
+                    feedback(player, "当前已有对局进行中。", NamedTextColor.RED);
+                    return;
+                }
+                player.closeInventory();
+                startGameAsPlayer(player);
+            }
+            case STOP_GAME -> {
+                if (!plugin.isGameRunning()) {
+                    feedback(player, "当前没有正在进行的对局。", NamedTextColor.GRAY);
+                    return;
+                }
+                plugin.stopGameFromAdmin();
+                refreshAllAdminTools();
+                feedback(player, "已停止当前对局。", NamedTextColor.RED);
+            }
+            case OPEN_SEEKER_MENU -> {
+                click(player);
+                menu.open(player, AdminMenu.Page.HOME);
+            }
+            case OPEN_PRESET_MENU -> {
+                click(player);
+                menu.open(player, AdminMenu.Page.PRESETS);
+            }
             case SET_SPAWN -> {
                 plugin.setArenaSpawnFromAdmin(player);
                 startPreview(player);
@@ -235,31 +305,6 @@ final class AdminController implements Listener {
                 maybeSendPreviewLegend(player);
             }
         }
-    }
-
-    private void handlePresetSelection(Player player, int delta) {
-        if (plugin.isGameRunning()) {
-            feedback(player, "游戏进行中时不能切换编辑预设。", NamedTextColor.RED);
-            return;
-        }
-        if (!plugin.cyclePreset(delta)) {
-            feedback(player, "当前只有这一个预设。", NamedTextColor.GRAY);
-            return;
-        }
-        startPreview(player);
-        refreshAllAdminTools();
-        feedback(player, "已切换到预设 #" + plugin.currentPresetLabel() + "。", NamedTextColor.LIGHT_PURPLE);
-        maybeSendPreviewLegend(player);
-    }
-
-    private void handlePresetToggle(Player player) {
-        if (plugin.isGameRunning()) {
-            feedback(player, "游戏进行中时不能修改预设启用状态。", NamedTextColor.RED);
-            return;
-        }
-        Hide_and_seek.TogglePresetResult result = plugin.togglePresetEnabled(plugin.currentPresetLabel());
-        refreshAllAdminTools();
-        feedback(player, result.message(), result.changed() ? NamedTextColor.GREEN : NamedTextColor.RED);
     }
 
     private void handlePresetCreate(Player player) {
@@ -278,7 +323,7 @@ final class AdminController implements Listener {
         maybeSendPreviewLegend(player);
     }
 
-    private void handlePresetDelete(Player player) {
+    private void handlePresetDelete(Player player, String presetId) {
         if (plugin.isGameRunning()) {
             feedback(player, "游戏进行中时不能删除预设。", NamedTextColor.RED);
             return;
@@ -287,8 +332,7 @@ final class AdminController implements Listener {
             feedback(player, "至少要保留一个预设。", NamedTextColor.RED);
             return;
         }
-        String deleting = plugin.currentPresetLabel();
-        String deleted = plugin.deletePreset(deleting);
+        String deleted = plugin.deletePreset(presetId);
         if (deleted == null) {
             feedback(player, "删除预设失败。", NamedTextColor.RED);
             return;
@@ -297,17 +341,6 @@ final class AdminController implements Listener {
         refreshAllAdminTools();
         feedback(player, "已删除预设 #" + deleted + "，当前为 #" + plugin.currentPresetLabel() + "。", NamedTextColor.RED);
         maybeSendPreviewLegend(player);
-    }
-
-    private void handleStartOrStop(Player player) {
-        if (plugin.isGameRunning()) {
-            plugin.stopGameFromAdmin();
-            refreshAllAdminTools();
-            feedback(player, "已停止当前对局。", NamedTextColor.RED);
-            return;
-        }
-        player.closeInventory();
-        startGameAsPlayer(player);
     }
 
     private void enterAdminMode(Player player, boolean notify) {
@@ -477,15 +510,14 @@ final class AdminController implements Listener {
     }
 
     private enum AdminTool {
-        PRESET_SELECTOR(0),
-        PRESET_TOGGLE(1),
-        PRESET_CREATE(2),
-        PRESET_DELETE(3),
-        START_OR_STOP_GAME(4),
-        SET_SPAWN(5),
-        SET_INITIAL_CORNER(6),
-        SET_FINAL_CORNER(7),
-        PREVIEW_BORDERS(8);
+        START_GAME(0),
+        STOP_GAME(1),
+        SET_SPAWN(2),
+        SET_INITIAL_CORNER(3),
+        SET_FINAL_CORNER(4),
+        PREVIEW_BORDERS(5),
+        OPEN_SEEKER_MENU(7),
+        OPEN_PRESET_MENU(8);
 
         private final int slot;
 
@@ -499,71 +531,58 @@ final class AdminController implements Listener {
 
         Material material(AdminController controller) {
             return switch (this) {
-                case PRESET_SELECTOR -> Material.PINK_WOOL;
-                case PRESET_TOGGLE -> controller.plugin.currentPresetEnabled() ? Material.LIME_WOOL : Material.RED_WOOL;
-                case PRESET_CREATE -> Material.LIME_DYE;
-                case PRESET_DELETE -> Material.RED_DYE;
-                case START_OR_STOP_GAME -> controller.plugin.isGameRunning() ? Material.RED_WOOL : Material.LIME_WOOL;
+                case START_GAME -> Material.LIME_WOOL;
+                case STOP_GAME -> Material.RED_WOOL;
                 case SET_SPAWN -> Material.RECOVERY_COMPASS;
                 case SET_INITIAL_CORNER -> Material.RED_DYE;
                 case SET_FINAL_CORNER -> Material.LIME_DYE;
                 case PREVIEW_BORDERS -> Material.SPYGLASS;
+                case OPEN_SEEKER_MENU -> Material.NETHER_STAR;
+                case OPEN_PRESET_MENU -> Material.BOOKSHELF;
             };
         }
 
         String displayName(AdminController controller) {
             return switch (this) {
-                case PRESET_SELECTOR -> "当前预设 #" + controller.plugin.currentPresetLabel();
-                case PRESET_TOGGLE -> controller.plugin.currentPresetEnabled() ? "当前预设已启用" : "当前预设已禁用";
-                case PRESET_CREATE -> "新增预设";
-                case PRESET_DELETE -> "删除当前预设";
-                case START_OR_STOP_GAME -> controller.plugin.isGameRunning() ? "结束游戏" : "开始游戏";
+                case START_GAME -> "开始游戏";
+                case STOP_GAME -> "结束游戏";
                 case SET_SPAWN -> "设置当前预设出生点";
                 case SET_INITIAL_CORNER -> "设置当前预设初始边界";
                 case SET_FINAL_CORNER -> "设置当前预设最终边界";
                 case PREVIEW_BORDERS -> "预览当前预设边界";
+                case OPEN_SEEKER_MENU -> "寻找者设置";
+                case OPEN_PRESET_MENU -> "预设列表";
             };
         }
 
         NamedTextColor color(AdminController controller) {
             return switch (this) {
-                case PRESET_SELECTOR -> NamedTextColor.LIGHT_PURPLE;
-                case PRESET_TOGGLE -> controller.plugin.currentPresetEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED;
-                case PRESET_CREATE -> NamedTextColor.GREEN;
-                case PRESET_DELETE -> NamedTextColor.RED;
-                case START_OR_STOP_GAME -> controller.plugin.isGameRunning() ? NamedTextColor.RED : NamedTextColor.GREEN;
+                case START_GAME -> NamedTextColor.GREEN;
+                case STOP_GAME -> NamedTextColor.RED;
                 case SET_SPAWN -> NamedTextColor.YELLOW;
                 case SET_INITIAL_CORNER -> NamedTextColor.RED;
                 case SET_FINAL_CORNER -> NamedTextColor.GREEN;
                 case PREVIEW_BORDERS -> NamedTextColor.AQUA;
+                case OPEN_SEEKER_MENU -> NamedTextColor.GOLD;
+                case OPEN_PRESET_MENU -> NamedTextColor.LIGHT_PURPLE;
             };
         }
 
         List<String> lore(AdminController controller) {
             return switch (this) {
-                case PRESET_SELECTOR -> List.of(
-                        "左键上一套，右键下一套",
-                        "正在编辑的预设固定为粉红色羊毛"
-                );
-                case PRESET_TOGGLE -> List.of(
-                        "右键切换当前预设启用状态",
-                        controller.plugin.currentPresetEnabled() ? "当前会参与随机选图" : "当前不会参与随机选图"
-                );
-                case PRESET_CREATE -> List.of("复制当前预设并自动切换到新预设");
-                case PRESET_DELETE -> List.of("删除当前编辑预设", "至少保留 1 个预设");
-                case START_OR_STOP_GAME -> List.of(
-                        controller.plugin.isGameRunning() ? "右键立即结束当前对局" : "右键后离开管理员模式并加入本局"
-                );
+                case START_GAME -> List.of("右键后离开管理员模式并加入本局");
+                case STOP_GAME -> List.of("右键立即结束当前对局");
                 case SET_SPAWN -> List.of("将当前位置设为当前预设的出生点");
                 case SET_INITIAL_CORNER -> List.of("第一次记录角点，第二次完成初始矩形");
                 case SET_FINAL_CORNER -> List.of("第一次记录角点，第二次完成最终矩形");
                 case PREVIEW_BORDERS -> List.of("显示出生点与初始/最终边界预览");
+                case OPEN_SEEKER_MENU -> List.of("打开单行设置栏", "只调整寻找者人数");
+                case OPEN_PRESET_MENU -> List.of("打开预设列表", "粉红=当前编辑  黄绿=启用  红色=禁用");
             };
         }
 
         boolean triggersPreviewAssist() {
-            return this == PRESET_SELECTOR
-                    || this == SET_SPAWN
+            return this == SET_SPAWN
                     || this == SET_INITIAL_CORNER
                     || this == SET_FINAL_CORNER
                     || this == PREVIEW_BORDERS;

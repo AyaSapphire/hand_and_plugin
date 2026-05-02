@@ -12,11 +12,14 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 final class AdminMenu {
     enum Page {
-        HOME
+        HOME,
+        PRESETS
     }
 
     private final Hide_and_seek plugin;
@@ -26,7 +29,7 @@ final class AdminMenu {
     }
 
     void open(Player player, Page page) {
-        player.openInventory(buildHome());
+        player.openInventory(page == Page.PRESETS ? buildPresets() : buildHome());
     }
 
     boolean isAdminMenu(Inventory inventory) {
@@ -38,11 +41,37 @@ final class AdminMenu {
         return holder.page();
     }
 
+    String presetIdAt(Inventory inventory, int slot) {
+        if (!(inventory.getHolder() instanceof Holder holder)) return null;
+        return holder.presetSlots().get(slot);
+    }
+
     private Inventory buildHome() {
         Inventory inventory = Bukkit.createInventory(new Holder(Page.HOME), 9, Component.text("寻找者设置", NamedTextColor.GOLD));
         fillFrame(inventory);
         placeAdjuster(inventory, 2, namedItem(Material.PLAYER_HEAD, "寻找者人数", NamedTextColor.AQUA,
                 List.of("当前值: " + plugin.configuredSeekerCount())));
+        return inventory;
+    }
+
+    private Inventory buildPresets() {
+        Map<Integer, String> presetSlots = new HashMap<>();
+        Inventory inventory = Bukkit.createInventory(new Holder(Page.PRESETS, presetSlots), 54, Component.text("预设列表", NamedTextColor.LIGHT_PURPLE));
+        fillFrame(inventory);
+
+        List<Hide_and_seek.PresetMenuEntry> entries = plugin.presetMenuEntries();
+        int slot = 0;
+        for (Hide_and_seek.PresetMenuEntry entry : entries) {
+            if (slot >= 45) break;
+            inventory.setItem(slot, presetItem(entry));
+            presetSlots.put(slot, entry.id());
+            slot++;
+        }
+
+        inventory.setItem(45, namedItem(Material.BOOKSHELF, "当前编辑预设 #" + plugin.currentPresetLabel(), NamedTextColor.LIGHT_PURPLE,
+                List.of("左键切换  中键删除  右键启停")));
+        inventory.setItem(47, namedItem(Material.LIME_DYE, "新增预设", NamedTextColor.GREEN,
+                List.of("复制当前编辑预设", "并自动切换到新预设")));
         return inventory;
     }
 
@@ -56,6 +85,22 @@ final class AdminMenu {
 
     private ItemStack actionButton(Material material, String label, NamedTextColor color, String description) {
         return namedItem(material, label, color, List.of(description));
+    }
+
+    private ItemStack presetItem(Hide_and_seek.PresetMenuEntry entry) {
+        Material material = entry.selected()
+                ? Material.PINK_WOOL
+                : entry.enabled() ? Material.LIME_WOOL : Material.RED_WOOL;
+        List<String> lore = new ArrayList<>();
+        lore.add(entry.selected() ? "当前正在编辑" : entry.enabled() ? "当前启用中" : "当前禁用中");
+        lore.add("世界: " + entry.worldName());
+        lore.add("初始边界: " + entry.initialWidth() + " x " + entry.initialDepth());
+        lore.add("最终边界: " + entry.finalWidth() + " x " + entry.finalDepth());
+        lore.add("左键切换到该预设");
+        lore.add("中键删除该预设");
+        lore.add("右键切换启用状态");
+        return namedItem(material, "预设 #" + entry.id(), entry.selected() ? NamedTextColor.LIGHT_PURPLE
+                : entry.enabled() ? NamedTextColor.GREEN : NamedTextColor.RED, lore);
     }
 
     private ItemStack namedItem(Material material, String name, NamedTextColor color, List<String> loreLines) {
@@ -81,7 +126,11 @@ final class AdminMenu {
         }
     }
 
-    private record Holder(Page page) implements InventoryHolder {
+    private record Holder(Page page, Map<Integer, String> presetSlots) implements InventoryHolder {
+        private Holder(Page page) {
+            this(page, Map.of());
+        }
+
         @Override
         public Inventory getInventory() {
             return null;
