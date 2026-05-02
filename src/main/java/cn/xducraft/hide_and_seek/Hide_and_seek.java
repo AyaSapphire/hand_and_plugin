@@ -95,6 +95,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private static final String SYSTEM_RELEASE_SEEKER = "\uE005";
     private static final String SYSTEM_START_SEEKER = "\uE006";
     private static final String SYSTEM_START_HIDER = "\uE007";
+    private static final double SEEKER_JAIL_HORIZONTAL_RADIUS = 5.0;
     private final Map<UUID, GamePlayer> players = new HashMap<>();
     private final List<Decoy> decoys = new ArrayList<>();
     private final Map<UUID, DecoyProjectile> decoyProjectiles = new HashMap<>();
@@ -532,8 +533,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             showTitle(player, systemGlyph(SYSTEM_START_HIDER), Component.empty(), 10, 60, 10);
         } else {
             giveSeekerLoadout(player);
-            player.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 620, 0, false, false, false));
-            player.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 620, 10, false, false, false));
             showTitle(player, systemGlyph(SYSTEM_START_SEEKER), Component.empty(), 10, 60, 10);
         }
     }
@@ -549,11 +548,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             for (Player player : Bukkit.getOnlinePlayers()) {
                 showTitle(player, systemGlyph(SYSTEM_RELEASE_SEEKER), Component.empty(), 5, 45, 10);
             }
-            playersWithRole(Role.SEEKER).forEach(player -> {
-                player.removePotionEffect(PotionEffectType.BLINDNESS);
-                player.removePotionEffect(PotionEffectType.SLOWNESS);
-                player.playSound(player.getLocation(), Sound.BLOCK_IRON_DOOR_OPEN, 1f, 1f);
-            });
+            playersWithRole(Role.SEEKER).forEach(player ->
+                    player.playSound(player.getLocation(), Sound.BLOCK_IRON_DOOR_OPEN, 1f, 1f));
         }
 
         updateBorder();
@@ -567,11 +563,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void tickPlayers() {
+        Location spawn = getArenaSpawn();
         for (GamePlayer state : players.values()) {
             Player player = Bukkit.getPlayer(state.uuid);
             if (player == null) continue;
             state.hp = Math.min(settings.maxHp(), state.hp + settings.hpRegenPerTick());
             state.mp = Math.min(settings.maxMp(), state.mp + settings.mpRegenPerTick());
+            tickSeekerStandby(player, state, spawn);
             tickFlyLock(player, state);
             tickAcceleratedAir(player, state);
             ensureLoadout(player, state.role);
@@ -776,10 +774,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             display.setPersistent(false);
             display.setTeleportDuration(2);
             display.setViewRange(128f);
+            display.setDisplayWidth(80f);
+            display.setDisplayHeight(80f);
             display.setTransformation(new Transformation(
-                    new Vector3f(-0.5f, 0f, -0.5f),
+                    new Vector3f(0f, 0f, 0f),
                     new Quaternionf(),
-                    new Vector3f(3.5f, 3.5f, 3.5f),
+                    new Vector3f(-6.6666665f, 6.6666665f, -6.6666665f),
                     new Quaternionf()
             ));
         });
@@ -946,7 +946,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
         state.disguiseData = target.getBlockData();
         state.disguised = true;
+        state.rotationLocked = true;
+        state.lockedYaw = 0f;
         if (state.display != null) state.display.setBlock(state.disguiseData);
+        if (state.display != null) {
+            applyDisguiseTransform(state.display, state.lockedYaw);
+            state.visualYaw = state.lockedYaw;
+        }
         player.getWorld().spawnParticle(Particle.BLOCK, player.getLocation().add(0, 1, 0), 25, 0.4, 0.6, 0.4, state.disguiseData);
         player.getWorld().playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, SoundCategory.MASTER, 1f, 1f);
     }
@@ -1001,10 +1007,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void toggleRotationLock(Player player, GamePlayer state) {
         if (state.role != Role.HIDER) return;
         state.rotationLocked = !state.rotationLocked;
-        state.lockedYaw = snapYaw(player.getLocation().getYaw());
+        if (state.rotationLocked) state.lockedYaw = snapYaw(player.getLocation().getYaw());
         if (state.display != null) {
-            applyDisguiseTransform(state.display, state.lockedYaw);
-            state.visualYaw = state.lockedYaw;
+            float visualYaw = state.rotationLocked ? state.lockedYaw : snapYaw(player.getLocation().getYaw());
+            applyDisguiseTransform(state.display, visualYaw);
+            state.visualYaw = visualYaw;
         }
         player.sendMessage(Component.text(state.rotationLocked ? "已锁定伪装旋转。" : "已解除旋转锁定。", NamedTextColor.AQUA));
         player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1.3f);
@@ -1115,7 +1122,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private int customDamageFromVanilla(EntityDamageEvent event) {
-        return Math.max(settings.minVanillaDamage(), (int) Math.ceil(event.getFinalDamage() * settings.vanillaDamageScale()));
+        return settings.damagePerHit();
     }
 
     private void damagePlayer(Player player, GamePlayer state, int damage) {
@@ -1284,20 +1291,36 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
     }
 
+    private void tickSeekerStandby(Player player, GamePlayer state, Location spawn) {
+        if (state.role != Role.SEEKER || remainingTicks <= settings.seekerReleaseAt()) return;
+        if (!player.getWorld().equals(spawn.getWorld())) return;
+        if (isInsideSeekerJail(player.getLocation(), spawn)) return;
+        Location reset = spawn.clone();
+        reset.setYaw(player.getLocation().getYaw());
+        reset.setPitch(player.getLocation().getPitch());
+        player.teleport(reset);
+    }
+
+    private boolean isInsideSeekerJail(Location location, Location center) {
+        double dx = location.getX() - center.getX();
+        double dz = location.getZ() - center.getZ();
+        return dx * dx + dz * dz < SEEKER_JAIL_HORIZONTAL_RADIUS * SEEKER_JAIL_HORIZONTAL_RADIUS;
+    }
+
     private void tickAcceleratedAir(Player player, GamePlayer state) {
         if (!player.isUnderWater() || isInBubbleColumn(player)) {
             state.airDamageTicks = 0;
             return;
         }
         player.setRemainingAir(Math.max(0, player.getRemainingAir() - settings.airExtraDrainPerTick()));
-        if (player.getRemainingAir() > 0) {
+        if (player.getRemainingAir() >= 50) {
             state.airDamageTicks = 0;
             return;
         }
         state.airDamageTicks++;
         if (state.airDamageTicks >= settings.airDamageIntervalTicks()) {
             state.airDamageTicks = 0;
-            damagePlayer(player, state, settings.airDamage());
+            damagePlayer(player, state, settings.damagePerHit());
         }
     }
 
@@ -1429,11 +1452,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (phase != GamePhase.RUNNING || remainingTicks <= settings.seekerReleaseAt()) return;
         GamePlayer state = players.get(event.getPlayer().getUniqueId());
         if (state == null || state.role != Role.SEEKER) return;
-        Location from = event.getFrom();
         Location to = event.getTo();
-        if (to != null && (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ())) {
-            event.setTo(new Location(from.getWorld(), from.getX(), from.getY(), from.getZ(), to.getYaw(), to.getPitch()));
-        }
+        if (to == null) return;
+        Location spawn = getArenaSpawn();
+        if (!to.getWorld().equals(spawn.getWorld())) return;
+        if (isInsideSeekerJail(to, spawn)) return;
+        Location reset = spawn.clone();
+        reset.setYaw(to.getYaw());
+        reset.setPitch(to.getPitch());
+        event.setTo(reset);
     }
 
     @EventHandler
@@ -1569,7 +1596,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private Component statusLine(GamePlayer state) {
         updateUiTrail(state);
-        int hpText = Math.max(0, state.hp / Math.max(1, settings.maxHp() / 5));
+        int hpStep = Math.max(1, settings.damagePerHit());
+        int hpText = state.hp <= 0 ? 0 : Math.max(1, Math.min(5, (int) Math.ceil(state.hp / (double) hpStep)));
         int mpText = Math.max(0, state.mp / Math.max(1, settings.maxMp() / 100));
         TextColor uiColor = TextColor.color(0x4e5c24);
         return Component.text("", uiColor).font(PLAYER_UI_FONT)
