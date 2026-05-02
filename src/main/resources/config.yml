@@ -10,16 +10,14 @@ game:
 player:
   hp: 2000
   mp: 2000
-  air: 50
   hpRegenPerTick: 5
   mpRegenPerTick: 10
   damagePerHit: 400
   vanillaDamageScale: 100.0
   minVanillaDamage: 40
-  airDrainPerTick: 2
-  airRegenPerTick: 5
-  airDamage: 220
-  airDamageIntervalTicks: 20
+  airExtraDrainPerTick: 6
+  airDamage: 120
+  airDamageIntervalTicks: 10
 
 abilities:
   disguise:
@@ -76,8 +74,9 @@ abilities:
     minYBoost: 0.45
   attackBullet:
     mp: 60
-    speed: 2.2
+    speed: 1.35
     hitRadius: 1.75
+    maxFlightTicks: 80
   scan:
     mp: 1300
     radius: 10.0
@@ -90,7 +89,7 @@ worldBorder:
   resetSize: 100000.0
   damageBuffer: 0.0
   warningTicks: 1200
-  outsideDamage: 120
+  outsideDamage: 400
   outsideDamageIntervalTicks: 20
   particleIntervalTicks: 10
   particleSpacing: 1.5
