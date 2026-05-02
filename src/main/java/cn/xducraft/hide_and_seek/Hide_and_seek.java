@@ -1287,10 +1287,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             }
             if (scanEffect.age >= settings.scanResultDelayTicks()) {
                 Player owner = Bukkit.getPlayer(scanEffect.owner);
-                if (owner != null) {
-                    owner.sendMessage(scanEffect.caught
-                            ? Component.text("扫描范围内发现躲藏者。", NamedTextColor.RED)
-                            : Component.text("扫描范围内没有发现躲藏者。", NamedTextColor.GREEN));
+                if (owner != null && scanEffect.caught) {
+                    owner.sendMessage(Component.text("扫描范围内发现躲藏者。", NamedTextColor.RED));
                 }
                 scanEffect.display.remove();
                 iterator.remove();
