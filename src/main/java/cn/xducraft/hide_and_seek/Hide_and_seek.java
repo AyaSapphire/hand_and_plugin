@@ -160,7 +160,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
 
         switch (args[0].toLowerCase(Locale.ROOT)) {
-            case "start" -> startGame(sender);
+            case "start" -> {
+                if (sender instanceof Player player && adminController != null && adminController.isAdmin(player.getUniqueId()) && !isGameRunning()) {
+                    adminController.startGameAsPlayer(player);
+                } else {
+                    startGame(sender);
+                }
+            }
             case "stop" -> {
                 stopGame(true);
                 sender.sendMessage("已停止躲猫猫。");
@@ -495,6 +501,43 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         loadSpawn();
     }
 
+    void setConfiguredBorderInitialFromCorner(Location corner) {
+        Location center = getArenaSpawn();
+        if (!center.getWorld().equals(corner.getWorld())) return;
+        double width = Math.max(1.0, Math.abs(corner.getX() - center.getX()) * 2.0);
+        double depth = Math.max(1.0, Math.abs(corner.getZ() - center.getZ()) * 2.0);
+        getConfig().set("worldBorder.initialWidth", roundToOneDecimal(width));
+        getConfig().set("worldBorder.initialDepth", roundToOneDecimal(depth));
+        getConfig().set("worldBorder.finalWidth", roundToOneDecimal(Math.min(configuredBorderFinalWidth(), width)));
+        getConfig().set("worldBorder.finalDepth", roundToOneDecimal(Math.min(configuredBorderFinalDepth(), depth)));
+        saveAndReloadRuntimeConfig();
+    }
+
+    void setConfiguredBorderFinalFromCorner(Location corner) {
+        Location center = getArenaSpawn();
+        if (!center.getWorld().equals(corner.getWorld())) return;
+        double width = Math.max(1.0, Math.abs(corner.getX() - center.getX()) * 2.0);
+        double depth = Math.max(1.0, Math.abs(corner.getZ() - center.getZ()) * 2.0);
+        getConfig().set("worldBorder.finalWidth", roundToOneDecimal(width));
+        getConfig().set("worldBorder.finalDepth", roundToOneDecimal(depth));
+        getConfig().set("worldBorder.initialWidth", roundToOneDecimal(Math.max(configuredBorderInitialWidth(), width)));
+        getConfig().set("worldBorder.initialDepth", roundToOneDecimal(Math.max(configuredBorderInitialDepth(), depth)));
+        saveAndReloadRuntimeConfig();
+    }
+
+    boolean canUseBorderCorner(Location corner) {
+        return getArenaSpawn().getWorld().equals(corner.getWorld());
+    }
+
+    void renderConfiguredBorderPreview(Player viewer) {
+        if (!canUseBorderCorner(viewer.getLocation())) return;
+        Location center = getArenaSpawn();
+        BorderRectangle initial = new BorderRectangle(center.getX(), center.getZ(), configuredBorderInitialWidth(), configuredBorderInitialDepth());
+        BorderRectangle fin = new BorderRectangle(center.getX(), center.getZ(), configuredBorderFinalWidth(), configuredBorderFinalDepth());
+        renderRectangleFor(viewer, initial, new Particle.DustOptions(Color.RED, 1.7f));
+        renderRectangleFor(viewer, fin, new Particle.DustOptions(Color.LIME, 1.35f));
+    }
+
     void removePlayerFromGameForAdmin(Player player) {
         UUID uuid = player.getUniqueId();
         if (waitingSpectators.remove(uuid)) {
@@ -551,10 +594,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     String borderStatusSummary() {
-        BorderRectangle rectangle = borderState == null
-                ? new BorderRectangle(getArenaSpawn().getX(), getArenaSpawn().getZ(), configuredBorderInitialWidth(), configuredBorderInitialDepth())
-                : borderState.current();
-        return (int) Math.round(rectangle.width()) + " x " + (int) Math.round(rectangle.depth());
+        return "初始 " + (int) Math.round(configuredBorderInitialWidth()) + " x " + (int) Math.round(configuredBorderInitialDepth())
+                + " / 最终 " + (int) Math.round(configuredBorderFinalWidth()) + " x " + (int) Math.round(configuredBorderFinalDepth());
     }
 
     private void setClampedIntConfigValue(String path, int value, int min, int max) {

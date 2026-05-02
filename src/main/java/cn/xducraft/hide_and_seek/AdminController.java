@@ -5,6 +5,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.GameMode;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.Sound;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -22,8 +23,10 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.scheduler.BukkitTask;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,6 +38,7 @@ final class AdminController implements Listener {
     private final AdminMenu menu;
     private final NamespacedKey adminItemKey;
     private final Set<UUID> admins = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, BukkitTask> previewTasks = new ConcurrentHashMap<>();
 
     AdminController(Hide_and_seek plugin) {
         this.plugin = plugin;
@@ -70,6 +74,19 @@ final class AdminController implements Listener {
         menu.open(player, AdminMenu.Page.HOME);
     }
 
+    void startGameAsPlayer(Player player) {
+        cancelPreview(player.getUniqueId());
+        if (admins.remove(player.getUniqueId())) {
+            removeMenuItem(player);
+        }
+        if (player.getGameMode() == GameMode.CREATIVE) {
+            player.setGameMode(GameMode.ADVENTURE);
+        }
+        plugin.applyIdleStateForOrdinaryPlayer(player);
+        player.sendMessage(Component.text("你已离开管理员模式，并作为普通玩家加入本局。", NamedTextColor.GREEN));
+        plugin.startGameFromAdmin(player);
+    }
+
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         if (event.getPlayer().getGameMode() != GameMode.CREATIVE) return;
@@ -84,6 +101,7 @@ final class AdminController implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         admins.remove(event.getPlayer().getUniqueId());
+        cancelPreview(event.getPlayer().getUniqueId());
     }
 
     @EventHandler
@@ -103,7 +121,7 @@ final class AdminController implements Listener {
         new BukkitRunnable() {
             @Override
             public void run() {
-                exitAdminMode(event.getPlayer(), true);
+                settleAdminIntoSpectator(event.getPlayer(), true);
             }
         }.runTask(plugin);
     }
@@ -147,7 +165,6 @@ final class AdminController implements Listener {
     private void handleMenuClick(Player player, AdminMenu.Page page, int slot) {
         switch (page) {
             case HOME -> handleHomeClick(player, slot);
-            case CONTROL -> handleControlClick(player, slot);
             case BORDER -> handleBorderClick(player, slot);
         }
     }
@@ -158,27 +175,27 @@ final class AdminController implements Listener {
             case 11 -> plugin.adjustConfiguredSeekerCount(-1);
             case 13 -> plugin.adjustConfiguredSeekerCount(1);
             case 14 -> plugin.adjustConfiguredSeekerCount(2);
-            case 19 -> plugin.adjustConfiguredSeekerReleaseDelayTicks(-600);
-            case 20 -> plugin.adjustConfiguredSeekerReleaseDelayTicks(-100);
-            case 22 -> plugin.adjustConfiguredSeekerReleaseDelayTicks(100);
-            case 23 -> plugin.adjustConfiguredSeekerReleaseDelayTicks(600);
-            case 28 -> plugin.adjustConfiguredDurationTicks(-1200);
-            case 29 -> plugin.adjustConfiguredDurationTicks(-600);
-            case 31 -> plugin.adjustConfiguredDurationTicks(600);
-            case 32 -> plugin.adjustConfiguredDurationTicks(1200);
-            case 36 -> plugin.startGameFromAdmin(player);
-            case 38 -> plugin.stopGameFromAdmin();
-            case 40 -> {
-                menu.open(player, AdminMenu.Page.CONTROL);
+            case 20 -> {
+                player.closeInventory();
+                startGameAsPlayer(player);
                 return;
             }
-            case 42 -> {
+            case 22 -> {
+                plugin.stopGameFromAdmin();
+                feedback(player, "已停止当前对局。", NamedTextColor.RED);
+            }
+            case 24 -> {
+                plugin.setArenaSpawnFromAdmin(player);
+                feedback(player, "已将当前位置设为小游戏出生点。", NamedTextColor.YELLOW);
+            }
+            case 31 -> {
                 menu.open(player, AdminMenu.Page.BORDER);
+                click(player);
                 return;
             }
-            case 44 -> {
-                manualExitAdminMode(player);
-                return;
+            case 33 -> {
+                plugin.reloadGameConfigFromAdmin();
+                feedback(player, "已重载配置。", NamedTextColor.GREEN);
             }
             default -> {
                 return;
@@ -187,43 +204,31 @@ final class AdminController implements Listener {
         menu.open(player, AdminMenu.Page.HOME);
     }
 
-    private void handleControlClick(Player player, int slot) {
-        switch (slot) {
-            case 11 -> plugin.forceSeekerWin();
-            case 13 -> plugin.forceHiderWin();
-            case 15 -> plugin.setArenaSpawnFromAdmin(player);
-            case 31 -> plugin.reloadGameConfigFromAdmin();
-            case 49 -> {
-                menu.open(player, AdminMenu.Page.HOME);
-                return;
-            }
-            default -> {
-                return;
-            }
-        }
-        menu.open(player, AdminMenu.Page.CONTROL);
-    }
-
     private void handleBorderClick(Player player, int slot) {
         switch (slot) {
-            case 10 -> plugin.adjustConfiguredBorderInitialWidth(-20.0);
-            case 11 -> plugin.adjustConfiguredBorderInitialWidth(-5.0);
-            case 13 -> plugin.adjustConfiguredBorderInitialWidth(5.0);
-            case 14 -> plugin.adjustConfiguredBorderInitialWidth(20.0);
-            case 19 -> plugin.adjustConfiguredBorderInitialDepth(-20.0);
-            case 20 -> plugin.adjustConfiguredBorderInitialDepth(-5.0);
-            case 22 -> plugin.adjustConfiguredBorderInitialDepth(5.0);
-            case 23 -> plugin.adjustConfiguredBorderInitialDepth(20.0);
-            case 28 -> plugin.adjustConfiguredBorderFinalWidth(-20.0);
-            case 29 -> plugin.adjustConfiguredBorderFinalWidth(-5.0);
-            case 31 -> plugin.adjustConfiguredBorderFinalWidth(5.0);
-            case 32 -> plugin.adjustConfiguredBorderFinalWidth(20.0);
-            case 37 -> plugin.adjustConfiguredBorderFinalDepth(-20.0);
-            case 38 -> plugin.adjustConfiguredBorderFinalDepth(-5.0);
-            case 40 -> plugin.adjustConfiguredBorderFinalDepth(5.0);
-            case 41 -> plugin.adjustConfiguredBorderFinalDepth(20.0);
+            case 20 -> {
+                if (!plugin.canUseBorderCorner(player.getLocation())) {
+                    feedback(player, "请先回到小游戏出生点所在世界。", NamedTextColor.RED);
+                } else {
+                    plugin.setConfiguredBorderInitialFromCorner(player.getLocation());
+                    feedback(player, "已使用当前位置设置初始边界角点。", NamedTextColor.YELLOW);
+                }
+            }
+            case 22 -> {
+                if (!plugin.canUseBorderCorner(player.getLocation())) {
+                    feedback(player, "请先回到小游戏出生点所在世界。", NamedTextColor.RED);
+                } else {
+                    plugin.setConfiguredBorderFinalFromCorner(player.getLocation());
+                    feedback(player, "已使用当前位置设置最终边界角点。", NamedTextColor.GOLD);
+                }
+            }
+            case 24 -> {
+                startPreview(player);
+                feedback(player, "已开始预览边界，持续 10 秒。", NamedTextColor.AQUA);
+            }
             case 49 -> {
                 menu.open(player, AdminMenu.Page.HOME);
+                click(player);
                 return;
             }
             default -> {
@@ -242,35 +247,14 @@ final class AdminController implements Listener {
         }
     }
 
-    private void exitAdminMode(Player player, boolean notify) {
+    private void settleAdminIntoSpectator(Player player, boolean notify) {
         if (!admins.remove(player.getUniqueId())) return;
+        cancelPreview(player.getUniqueId());
         removeMenuItem(player);
-        if (plugin.isGameRunning()) {
-            plugin.placePlayerIntoWaitingState(player);
-            if (notify) {
-                player.sendMessage(Component.text("已退出管理员模式。本局中你将以旁观者等待下一局。", NamedTextColor.YELLOW));
-            }
-            return;
-        }
-        plugin.applyIdleStateForOrdinaryPlayer(player);
+        plugin.placePlayerIntoWaitingState(player);
         if (notify) {
-            player.sendMessage(Component.text("已退出管理员模式。", NamedTextColor.GREEN));
+            player.sendMessage(Component.text("已离开管理员模式。本局中你将以旁观者等待下一局。", NamedTextColor.YELLOW));
         }
-    }
-
-    private void manualExitAdminMode(Player player) {
-        player.closeInventory();
-        if (!admins.remove(player.getUniqueId())) return;
-        removeMenuItem(player);
-        if (plugin.isGameRunning()) {
-            player.setGameMode(GameMode.SPECTATOR);
-            plugin.placePlayerIntoWaitingState(player);
-            player.sendMessage(Component.text("已退出管理员模式。本局中你将以旁观者等待下一局。", NamedTextColor.YELLOW));
-            return;
-        }
-        player.setGameMode(GameMode.ADVENTURE);
-        plugin.applyIdleStateForOrdinaryPlayer(player);
-        player.sendMessage(Component.text("已退出管理员模式。", NamedTextColor.GREEN));
     }
 
     private void ensureMenuItem(Player player) {
@@ -284,6 +268,43 @@ final class AdminController implements Listener {
             if (isAdminItem(inventory.getItem(slot))) inventory.setItem(slot, null);
         }
         if (isAdminItem(inventory.getItemInOffHand())) inventory.setItemInOffHand(null);
+    }
+
+    private void startPreview(Player player) {
+        cancelPreview(player.getUniqueId());
+        BukkitTask task = new BukkitRunnable() {
+            private int ticks;
+
+            @Override
+            public void run() {
+                if (!player.isOnline() || !isAdmin(player.getUniqueId())) {
+                    cancelPreview(player.getUniqueId());
+                    cancel();
+                    return;
+                }
+                plugin.renderConfiguredBorderPreview(player);
+                ticks++;
+                if (ticks >= 200) {
+                    cancelPreview(player.getUniqueId());
+                    cancel();
+                }
+            }
+        }.runTaskTimer(plugin, 0L, 5L);
+        previewTasks.put(player.getUniqueId(), task);
+    }
+
+    private void cancelPreview(UUID uuid) {
+        BukkitTask task = previewTasks.remove(uuid);
+        if (task != null) task.cancel();
+    }
+
+    private void feedback(Player player, String message, NamedTextColor color) {
+        click(player);
+        player.sendMessage(Component.text(message, color));
+    }
+
+    private void click(Player player) {
+        player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1.1f);
     }
 
     private ItemStack createMenuItem() {
