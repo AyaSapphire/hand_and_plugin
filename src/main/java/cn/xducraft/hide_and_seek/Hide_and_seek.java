@@ -1406,11 +1406,26 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (state.role == Role.SEEKER && event.getCause() == EntityDamageEvent.DamageCause.FALL) {
             return 0;
         }
-        int damage = settings.damagePerHit();
+        int damage;
+        if (isFixedHitDamage(event.getCause())) {
+            damage = settings.damagePerHit();
+        } else {
+            damage = Math.max(
+                    settings.minVanillaDamage(),
+                    (int) Math.round(event.getDamage() * settings.vanillaDamageScale())
+            );
+        }
         if (state.role == Role.SEEKER) {
             damage = Math.max(1, (int) Math.round(damage * settings.seekerDamageTakenScale()));
         }
         return damage;
+    }
+
+    private boolean isFixedHitDamage(EntityDamageEvent.DamageCause cause) {
+        return switch (cause) {
+            case ENTITY_ATTACK, ENTITY_SWEEP_ATTACK, PROJECTILE, SONIC_BOOM, THORNS, MAGIC -> true;
+            default -> false;
+        };
     }
 
     private boolean isContinuousHazard(EntityDamageEvent.DamageCause cause) {
