@@ -47,6 +47,7 @@ import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerGameModeChangeEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
@@ -1837,6 +1838,20 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 checkWin();
             }
         }
+    }
+
+    @EventHandler
+    public void onGameModeChange(PlayerGameModeChangeEvent event) {
+        if (event.getNewGameMode() != GameMode.SPECTATOR) return;
+        if (phase != GamePhase.RUNNING) return;
+        if (adminController != null && adminController.isAdmin(event.getPlayer().getUniqueId())) return;
+        GamePlayer state = players.remove(event.getPlayer().getUniqueId());
+        if (state == null) return;
+        if (bossBar != null) bossBar.removePlayer(event.getPlayer());
+        cleanupPlayer(event.getPlayer(), state);
+        setupWaitingSpectator(event.getPlayer());
+        Bukkit.broadcast(Component.text(event.getPlayer().getName() + " 已转为观众。", NamedTextColor.YELLOW));
+        checkWin();
     }
 
     private void cleanupPlayer(Player player, GamePlayer state) {
