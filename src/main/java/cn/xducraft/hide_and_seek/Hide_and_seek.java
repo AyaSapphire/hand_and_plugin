@@ -9,6 +9,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Color;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
+import org.bukkit.GameRules;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -117,6 +118,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private int jailCellOpenTicks = -1;
     private int borderParticleTick;
     private int remainingTicks;
+    private Boolean originalLocatorBar;
 
     @Override
     public void onEnable() {
@@ -507,6 +509,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             setupPlayer(player, state, spawn);
             bossBar.addPlayer(player);
         }
+        disableLocatorBar(spawn.getWorld());
 
         setupWorldBorder(spawn);
         spawnJailCell(spawn);
@@ -521,6 +524,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.setHealth(getMaxHealth(player));
         player.setFoodLevel(20);
         player.setSaturation(20);
+        state.originalExp = player.getExp();
+        state.originalLevel = player.getLevel();
+        state.originalTotalExperience = player.getTotalExperience();
+        hideExperienceBar(player);
         joinScoreboardTeam(player, state.role);
 
         if (state.role == Role.HIDER) {
@@ -572,6 +579,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             tickFlyLock(player, state);
             tickAcceleratedAir(player, state);
             ensureLoadout(player, state.role);
+            hideExperienceBar(player);
             if (state.role == Role.HIDER) {
                 tickDisguise(player, state);
                 renderDisguiseTargetOutline(player);
@@ -741,6 +749,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         pendingBorders.clear();
         warnedBorderStages.clear();
         startedBorderStages.clear();
+        restoreLocatorBar();
         players.clear();
         cleanupWaitingSpectators();
         World world = getArenaSpawn().getWorld();
@@ -1078,7 +1087,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             spawned.setTransformation(new Transformation(
                     new Vector3f(-0.5f, 0f, -0.5f),
                     new Quaternionf(),
-                    new Vector3f(0.25f, 0.25f, 0.25f),
+                    new Vector3f(1.0f, 1.0f, 1.0f),
                     new Quaternionf()
             ));
         });
@@ -1215,15 +1224,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             }
             scanEffect.age++;
             double progress = Math.min(1.0, scanEffect.age / (double) settings.scanResultDelayTicks());
-            float scale = (float) (0.35 + progress * settings.scanRadius() / 2.2);
-            scanEffect.display.setRotation(scanEffect.age * 18f, 0f);
-            scanEffect.display.setTransformation(new Transformation(
-                    new Vector3f(-0.5f, 0f, -0.5f),
-                    new Quaternionf(),
-                    new Vector3f(scale, scale, scale),
-                    new Quaternionf()
-            ));
             double radius = Math.max(1.0, settings.scanRadius() * progress);
+            if (scanEffect.age % 2 == 0) renderScanRing(scanEffect.origin, radius);
             if (!scanEffect.caught) {
                 scanEffect.caught = playersWithRole(Role.HIDER).stream()
                         .anyMatch(hider -> hider.getWorld().equals(scanEffect.origin.getWorld())
@@ -1239,6 +1241,18 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 scanEffect.display.remove();
                 iterator.remove();
             }
+        }
+    }
+
+    private void renderScanRing(Location origin, double radius) {
+        World world = origin.getWorld();
+        if (world == null) return;
+        int points = Math.max(16, (int) Math.round(radius * 8.0));
+        Particle.DustOptions dust = new Particle.DustOptions(Color.AQUA, 1.0f);
+        for (int i = 0; i < points; i++) {
+            double angle = Math.PI * 2.0 * i / points;
+            Location location = origin.clone().add(Math.cos(angle) * radius, 0.15, Math.sin(angle) * radius);
+            world.spawnParticle(Particle.DUST, location, 1, 0, 0, 0, 0, dust);
         }
     }
 
@@ -1413,6 +1427,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (bossBar != null && state != null) {
             bossBar.addPlayer(event.getPlayer());
             ensureLoadout(event.getPlayer(), state.role);
+            hideExperienceBar(event.getPlayer());
         } else if (phase == GamePhase.RUNNING) {
             setupWaitingSpectator(event.getPlayer());
         }
@@ -1449,6 +1464,30 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.removePotionEffect(PotionEffectType.SLOWNESS);
         clearScoreboardTeam(player);
         removeAbilityItems(player.getInventory());
+        player.setTotalExperience(state.originalTotalExperience);
+        player.setLevel(state.originalLevel);
+        player.setExp(state.originalExp);
+    }
+
+    private void hideExperienceBar(Player player) {
+        player.setExp(0f);
+        player.setLevel(0);
+        player.setTotalExperience(0);
+        player.sendExperienceChange(0f, 0);
+    }
+
+    private void disableLocatorBar(World world) {
+        if (world == null) return;
+        if (originalLocatorBar == null) originalLocatorBar = world.getGameRuleValue(GameRules.LOCATOR_BAR);
+        world.setGameRule(GameRules.LOCATOR_BAR, false);
+    }
+
+    private void restoreLocatorBar() {
+        World world = getArenaSpawn().getWorld();
+        if (world != null && originalLocatorBar != null) {
+            world.setGameRule(GameRules.LOCATOR_BAR, originalLocatorBar);
+        }
+        originalLocatorBar = null;
     }
 
     private void removeAbilityItems(PlayerInventory inventory) {
@@ -1467,6 +1506,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         player.removePotionEffect(PotionEffectType.SLOWNESS);
         removeAbilityItems(player.getInventory());
         if (bossBar != null) bossBar.addPlayer(player);
+        hideExperienceBar(player);
         showTitle(player, Component.text("本局进行中", NamedTextColor.YELLOW), Component.text("你已进入旁观，下一局会自动加入", NamedTextColor.GRAY), 10, 70, 20);
     }
 
@@ -1525,35 +1565,84 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private Component statusLine(GamePlayer state) {
-        int hpBars = clampedBarIndex(state.hp, settings.maxHp(), 40);
-        int mpBars = clampedBarIndex(state.mp, settings.maxMp(), 40);
-        int hpText = Math.max(0, Math.min(5, (int) Math.ceil(state.hp * 5.0 / settings.maxHp())));
-        int mpText = Math.max(0, Math.min(100, (int) Math.round(state.mp * 100.0 / settings.maxMp())));
+        updateUiTrail(state);
+        int hpText = Math.max(0, state.hp / Math.max(1, settings.maxHp() / 5));
+        int mpText = Math.max(0, state.mp / Math.max(1, settings.maxMp() / 100));
         TextColor uiColor = TextColor.color(0x4e5c24);
-        return Component.text("", NamedTextColor.WHITE).font(PLAYER_UI_FONT)
+        return Component.text("", uiColor).font(PLAYER_UI_FONT)
                 .append(uiText("\uEF03\uE0A1\uEF04", uiColor))
-                .append(uiText("\uEF03" + hpBarGlyph(hpBars) + "\uEF04", uiColor))
+                .append(uiText("\uEF03" + hpBarGlyph(state.hpOld, settings.maxHp()) + "\uEF04", uiColor))
+                .append(uiText("\uEF03" + hpBarGlyph(state.hp, settings.maxHp()) + "\uEF04", NamedTextColor.WHITE))
+                .append(uiText("\uEF03" + hpCapGlyph(state.hp, settings.maxHp()) + "\uEF04", NamedTextColor.WHITE))
                 .append(uiText("\uEF07HP " + hpText + "/5\uEF08", NamedTextColor.WHITE))
                 .append(uiText("\uEF01\uE001\uEF02", uiColor))
-                .append(uiText("\uEF01" + mpBarGlyph(mpBars) + "\uEF02", uiColor))
-                .append(uiText("\uEF05MP " + mpText + "/100\uEF06", NamedTextColor.WHITE));
+                .append(uiText("\uEF01" + mpBarGlyph(state.mpOld, settings.maxMp()) + "\uEF02", uiColor))
+                .append(uiText("\uEF01" + mpBarGlyph(state.mp, settings.maxMp()) + "\uEF02", NamedTextColor.WHITE))
+                .append(uiText("\uEF05MP " + paddedMp(mpText) + "/100\uEF06", NamedTextColor.WHITE));
     }
 
     private Component uiText(String text, TextColor color) {
         return Component.text(text).font(PLAYER_UI_FONT).color(color);
     }
 
-    private int clampedBarIndex(int value, int max, int steps) {
-        if (max <= 0) return 0;
-        return Math.max(0, Math.min(steps - 1, (int) Math.ceil(value * steps / (double) max) - 1));
+    private void updateUiTrail(GamePlayer state) {
+        if (state.hpOld <= 0) state.hpOld = state.hp;
+        if (state.mpOld <= 0) state.mpOld = state.mp;
+        state.hpOld = moveTowardWithDelay(state.hpOld, state.hp, 150, state, true);
+        state.mpOld = moveTowardWithDelay(state.mpOld, state.mp, 150, state, false);
     }
 
-    private String mpBarGlyph(int index) {
-        return String.valueOf((char) (0xE001 + index));
+    private int moveTowardWithDelay(int current, int target, int step, GamePlayer state, boolean hp) {
+        if (current <= target) {
+            if (hp) state.hpTrailDelayTicks = 0;
+            else state.mpTrailDelayTicks = 0;
+            return target;
+        }
+        int delayLimit = hp ? 5 : 15;
+        if (hp) {
+            if (state.hpTrailDelayTicks < delayLimit) {
+                state.hpTrailDelayTicks++;
+                return current;
+            }
+        } else if (state.mpTrailDelayTicks < delayLimit) {
+            state.mpTrailDelayTicks++;
+            return current;
+        }
+        return Math.max(target, current - step);
     }
 
-    private String hpBarGlyph(int index) {
-        return String.valueOf((char) (0xE0B1 + index));
+    private String mpBarGlyph(int value, int max) {
+        return barGlyph(value, max, 0xE001);
+    }
+
+    private String hpBarGlyph(int value, int max) {
+        return barGlyph(value, max, 0xE0B1);
+    }
+
+    private String hpCapGlyph(int value, int max) {
+        if (max <= 0 || value <= 0) return "\uE0B1";
+        int fifth = Math.max(1, max / 5);
+        int hpUnits = Math.max(0, Math.min(5, value / fifth));
+        return switch (hpUnits) {
+            case 5 -> "\uE0A6";
+            case 4 -> "\uE0A5";
+            case 3 -> "\uE0A4";
+            case 2 -> "\uE0A3";
+            case 1 -> "\uE0A2";
+            default -> "\uE0B1";
+        };
+    }
+
+    private String barGlyph(int value, int max, int baseCodepoint) {
+        if (max <= 0) return String.valueOf((char) baseCodepoint);
+        int index = Math.max(0, Math.min(79, (int) Math.ceil(value * 80.0 / max) - 1));
+        return String.valueOf((char) (baseCodepoint + index));
+    }
+
+    private String paddedMp(int mpText) {
+        if (mpText >= 100) return "100";
+        if (mpText >= 10) return "  " + mpText;
+        return "    " + mpText;
     }
 
     private Component systemGlyph(String glyph) {
@@ -1986,6 +2075,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private Role role;
         private int hp;
         private int mp;
+        private int hpOld;
+        private int mpOld;
+        private int hpTrailDelayTicks;
+        private int mpTrailDelayTicks;
         private boolean disguised;
         private boolean rotationLocked;
         private float lockedYaw;
@@ -1996,12 +2089,17 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private int flyLockTicks;
         private int borderDamageTicks;
         private int airDamageTicks;
+        private float originalExp;
+        private int originalLevel;
+        private int originalTotalExperience;
 
         private GamePlayer(UUID uuid, Role role, int hp, int mp) {
             this.uuid = uuid;
             this.role = role;
             this.hp = hp;
             this.mp = mp;
+            this.hpOld = hp;
+            this.mpOld = mp;
             this.disguiseData = Bukkit.createBlockData(Material.AIR);
         }
     }
