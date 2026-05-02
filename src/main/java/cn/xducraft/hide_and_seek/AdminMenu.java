@@ -39,7 +39,7 @@ final class AdminMenu {
     }
 
     private Inventory buildHome() {
-        Inventory inventory = Bukkit.createInventory(new Holder(Page.HOME), 9, Component.text("寻找者设置", NamedTextColor.GOLD));
+        Inventory inventory = Bukkit.createInventory(new Holder(Page.HOME), 9, Component.text("寻找者设置 - " + plugin.currentPresetLabel(), NamedTextColor.GOLD));
         fillFrame(inventory);
 
         placeAdjuster(inventory, 2, namedItem(Material.PLAYER_HEAD, "寻找者人数", NamedTextColor.AQUA,

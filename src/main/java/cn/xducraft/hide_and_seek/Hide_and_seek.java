@@ -111,6 +111,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private final Map<Integer, BorderRectangle> pendingBorders = new HashMap<>();
     private final Set<Integer> warnedBorderStages = new HashSet<>();
     private final Set<Integer> startedBorderStages = new HashSet<>();
+    private final Map<String, ArenaPreset> presets = new LinkedHashMap<>();
     private NamespacedKey abilityKey;
     private NamespacedKey noDropKey;
     private NamespacedKey decoyProjectileKey;
@@ -119,7 +120,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private BossBar bossBar;
     private GamePhase phase = GamePhase.IDLE;
     private AdminController adminController;
-    private Location arenaSpawn;
+    private String selectedPresetKey;
+    private ArenaPreset currentMatchPreset;
     private BorderState borderState;
     private ItemDisplay jailCell;
     private int jailCellOpenTicks = -1;
@@ -135,7 +137,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         saveDefaultConfig();
         ensureConfigDefaults();
         settings = loadSettings();
-        loadSpawn();
         Bukkit.getPluginManager().registerEvents(this, this);
         adminController = new AdminController(this);
         Bukkit.getPluginManager().registerEvents(adminController, this);
@@ -177,9 +178,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                     sender.sendMessage("只有玩家可以设置出生点。");
                     return true;
                 }
-                arenaSpawn = player.getLocation();
-                saveSpawn(arenaSpawn);
-                sender.sendMessage("已设置躲猫猫出生点。");
+                setArenaSpawnFromAdmin(player);
+                sender.sendMessage("已设置当前预设的出生点。");
             }
             case "status" -> sendStatus(sender);
             case "menu", "admin" -> {
@@ -190,6 +190,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 adminController.openMenuCommand(player);
             }
             case "reload" -> reloadGameConfig(sender);
+            case "preset", "presets" -> handlePresetCommand(sender, args);
             case "settings", "config" -> handleSettingsCommand(sender, args);
             case "blacklist" -> handleBlacklistCommand(sender, args);
             case "help" -> sendHelp(sender);
@@ -206,9 +207,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (args.length > 1 && args[0].equalsIgnoreCase("blacklist")) {
             return tabCompleteBlacklist(args);
         }
+        if (args.length > 1 && (args[0].equalsIgnoreCase("preset") || args[0].equalsIgnoreCase("presets"))) {
+            return tabCompletePresets(args);
+        }
         if (args.length != 1) return List.of();
         String prefix = args[0].toLowerCase(Locale.ROOT);
-        return List.of("help", "start", "stop", "setspawn", "status", "menu", "admin", "reload", "settings", "blacklist").stream()
+        return List.of("help", "start", "stop", "setspawn", "status", "menu", "admin", "reload", "preset", "settings", "blacklist").stream()
                 .filter(option -> option.startsWith(prefix))
                 .toList();
     }
@@ -216,16 +220,19 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void sendHelp(CommandSender sender) {
         sender.sendMessage("/has start - 开始一局躲猫猫");
         sender.sendMessage("/has stop - 停止当前游戏并清理实体");
-        sender.sendMessage("/has setspawn - 使用你当前位置作为竞技场出生点");
+        sender.sendMessage("/has setspawn - 使用你当前位置作为当前预设出生点");
         sender.sendMessage("/has status - 查看当前游戏和关键设置");
         sender.sendMessage("/has menu - 打开管理员菜单");
         sender.sendMessage("/has reload - 重载 config.yml");
+        sender.sendMessage("/has preset list|select|create|delete|info - 管理地图预设");
         sender.sendMessage("/has settings list|get|set|reset - 查看和调整玩法设置");
         sender.sendMessage("/has blacklist list|add|remove - 查看和调整伪装黑名单");
     }
 
     private void sendStatus(CommandSender sender) {
         sender.sendMessage("状态: " + phase + ", 玩家: " + players.size() + ", 剩余 tick: " + remainingTicks);
+        sender.sendMessage("预设: 当前编辑 " + currentPresetLabel()
+                + (currentMatchPreset == null ? "" : "，本局使用 " + currentMatchPreset.key()));
         sender.sendMessage("设置: 时长 " + settings.durationTicks() + " ticks, seeker " + settings.seekerCount()
                 + ", HP/MP " + settings.maxHp() + "/" + settings.maxMp()
                 + ", 攻击伤害 " + settings.damagePerHit());
@@ -235,12 +242,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         reloadConfig();
         ensureConfigDefaults();
         settings = loadSettings();
-        loadSpawn();
         sender.sendMessage("已重载躲猫猫配置。正在运行的游戏会从下一次相关逻辑开始使用新设置。");
     }
 
     private void ensureConfigDefaults() {
         getConfig().options().copyDefaults(true);
+        migrateLegacyPresetConfigIfNeeded();
+        loadPresetState();
         saveConfig();
     }
 
@@ -305,6 +313,83 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             case "reload" -> reloadGameConfig(sender);
             default -> sender.sendMessage("/has blacklist <list|add|remove|reload>");
         }
+    }
+
+    private void handlePresetCommand(CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage("/has preset <list|select|create|delete|info>");
+            return;
+        }
+        switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "list" -> sender.sendMessage("可用预设: " + String.join(", ", presetKeys()));
+            case "info" -> sender.sendMessage("当前编辑预设: " + currentPresetLabel()
+                    + " | 出生点: " + arenaSpawnSummary()
+                    + " | 边界: " + borderStatusSummary());
+            case "select" -> {
+                if (phase == GamePhase.RUNNING) {
+                    sender.sendMessage("游戏进行中时不能切换编辑预设。");
+                    return;
+                }
+                if (args.length < 3) {
+                    sender.sendMessage("/has preset select <name>");
+                    return;
+                }
+                if (!selectPreset(args[2])) {
+                    sender.sendMessage("未找到预设: " + args[2]);
+                    return;
+                }
+                sender.sendMessage("已切换到预设: " + currentPresetLabel());
+            }
+            case "create" -> {
+                if (phase == GamePhase.RUNNING) {
+                    sender.sendMessage("游戏进行中时不能创建预设。");
+                    return;
+                }
+                if (args.length < 3) {
+                    sender.sendMessage("/has preset create <name>");
+                    return;
+                }
+                String created = createPreset(args[2]);
+                if (created == null) {
+                    sender.sendMessage("预设名只能使用字母、数字、下划线或短横线，且不能重复。");
+                    return;
+                }
+                sender.sendMessage("已创建并切换到预设: " + created);
+            }
+            case "delete" -> {
+                if (phase == GamePhase.RUNNING) {
+                    sender.sendMessage("游戏进行中时不能删除预设。");
+                    return;
+                }
+                if (args.length < 3) {
+                    sender.sendMessage("/has preset delete <name>");
+                    return;
+                }
+                String deleted = deletePreset(args[2]);
+                if (deleted == null) {
+                    sender.sendMessage("无法删除该预设。至少保留一个预设，且名字必须存在。");
+                    return;
+                }
+                sender.sendMessage("已删除预设: " + deleted + "，当前预设: " + currentPresetLabel());
+            }
+            default -> sender.sendMessage("/has preset <list|select|create|delete|info>");
+        }
+    }
+
+    private List<String> tabCompletePresets(String[] args) {
+        if (args.length == 2) {
+            String prefix = args[1].toLowerCase(Locale.ROOT);
+            return List.of("list", "select", "create", "delete", "info").stream()
+                    .filter(option -> option.startsWith(prefix))
+                    .toList();
+        }
+        if (args.length == 3 && (args[1].equalsIgnoreCase("select") || args[1].equalsIgnoreCase("delete"))) {
+            String prefix = args[2].toLowerCase(Locale.ROOT);
+            return presetKeys().stream()
+                    .filter(option -> option.startsWith(prefix))
+                    .toList();
+        }
+        return List.of();
     }
 
     private void listDisguiseBlacklist(CommandSender sender) {
@@ -375,8 +460,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
         getConfig().set(path, value);
         saveConfig();
+        loadPresetState();
         settings = loadSettings();
-        loadSpawn();
         sender.sendMessage("已设置 " + path + " = " + value);
     }
 
@@ -388,8 +473,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         Object value = getConfig().getDefaults().get(path);
         getConfig().set(path, value);
         saveConfig();
+        loadPresetState();
         settings = loadSettings();
-        loadSpawn();
         sender.sendMessage("已重置 " + path + " = " + value);
     }
 
@@ -410,68 +495,23 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     double configuredBorderInitialWidth() {
-        return positiveDoubleWithFallback("worldBorder.initialWidth", "worldBorder.initialSize");
+        return configuredInitialBorder().width();
     }
 
     double configuredBorderInitialDepth() {
-        return positiveDoubleWithFallback("worldBorder.initialDepth", "worldBorder.initialSize");
+        return configuredInitialBorder().depth();
     }
 
     double configuredBorderFinalWidth() {
-        return loadBorderFinalDimension("worldBorder.finalWidth", "worldBorder.finalSize", "width", configuredBorderInitialWidth());
+        return configuredFinalBorder().width();
     }
 
     double configuredBorderFinalDepth() {
-        return loadBorderFinalDimension("worldBorder.finalDepth", "worldBorder.finalSize", "depth", configuredBorderInitialDepth());
+        return configuredFinalBorder().depth();
     }
 
     void adjustConfiguredSeekerCount(int delta) {
         setClampedIntConfigValue("game.seekerCount", configuredSeekerCount() + delta, 1, 64);
-    }
-
-    void adjustConfiguredSeekerReleaseDelayTicks(int delta) {
-        setClampedIntConfigValue("game.seekerReleaseDelayTicks", configuredSeekerReleaseDelayTicks() + delta, 0, configuredDurationTicks());
-    }
-
-    void adjustConfiguredDurationTicks(int delta) {
-        int duration = Math.max(20, configuredDurationTicks() + delta);
-        getConfig().set("game.durationTicks", duration);
-        if (configuredSeekerReleaseDelayTicks() > duration) {
-            getConfig().set("game.seekerReleaseDelayTicks", duration);
-        }
-        saveAndReloadRuntimeConfig();
-    }
-
-    void adjustConfiguredBorderInitialWidth(double delta) {
-        double initialWidth = Math.max(1.0, configuredBorderInitialWidth() + delta);
-        double finalWidth = Math.min(configuredBorderFinalWidth(), initialWidth);
-        getConfig().set("worldBorder.initialWidth", roundToOneDecimal(initialWidth));
-        getConfig().set("worldBorder.finalWidth", roundToOneDecimal(finalWidth));
-        saveAndReloadRuntimeConfig();
-    }
-
-    void adjustConfiguredBorderInitialDepth(double delta) {
-        double initialDepth = Math.max(1.0, configuredBorderInitialDepth() + delta);
-        double finalDepth = Math.min(configuredBorderFinalDepth(), initialDepth);
-        getConfig().set("worldBorder.initialDepth", roundToOneDecimal(initialDepth));
-        getConfig().set("worldBorder.finalDepth", roundToOneDecimal(finalDepth));
-        saveAndReloadRuntimeConfig();
-    }
-
-    void adjustConfiguredBorderFinalWidth(double delta) {
-        double finalWidth = Math.max(1.0, configuredBorderFinalWidth() + delta);
-        double initialWidth = Math.max(configuredBorderInitialWidth(), finalWidth);
-        getConfig().set("worldBorder.finalWidth", roundToOneDecimal(finalWidth));
-        getConfig().set("worldBorder.initialWidth", roundToOneDecimal(initialWidth));
-        saveAndReloadRuntimeConfig();
-    }
-
-    void adjustConfiguredBorderFinalDepth(double delta) {
-        double finalDepth = Math.max(1.0, configuredBorderFinalDepth() + delta);
-        double initialDepth = Math.max(configuredBorderInitialDepth(), finalDepth);
-        getConfig().set("worldBorder.finalDepth", roundToOneDecimal(finalDepth));
-        getConfig().set("worldBorder.initialDepth", roundToOneDecimal(initialDepth));
-        saveAndReloadRuntimeConfig();
     }
 
     void startGameFromAdmin(Player player) {
@@ -491,51 +531,32 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     void setArenaSpawnFromAdmin(Player player) {
-        arenaSpawn = player.getLocation();
-        saveSpawn(arenaSpawn);
+        saveSpawn(player.getLocation());
     }
 
     void reloadGameConfigFromAdmin() {
         reloadConfig();
         ensureConfigDefaults();
         settings = loadSettings();
-        loadSpawn();
     }
 
-    void setConfiguredBorderInitialFromCorner(Location corner) {
-        Location center = getArenaSpawn();
-        if (!center.getWorld().equals(corner.getWorld())) return;
-        double width = Math.max(1.0, Math.abs(corner.getX() - center.getX()) * 2.0);
-        double depth = Math.max(1.0, Math.abs(corner.getZ() - center.getZ()) * 2.0);
-        getConfig().set("worldBorder.initialWidth", roundToOneDecimal(width));
-        getConfig().set("worldBorder.initialDepth", roundToOneDecimal(depth));
-        getConfig().set("worldBorder.finalWidth", roundToOneDecimal(Math.min(configuredBorderFinalWidth(), width)));
-        getConfig().set("worldBorder.finalDepth", roundToOneDecimal(Math.min(configuredBorderFinalDepth(), depth)));
-        saveAndReloadRuntimeConfig();
+    BorderSelectionResult setConfiguredBorderInitialFromCorners(Location first, Location second) {
+        return saveConfiguredBorderFromCorners("initialBorder", first, second, NamedTextColor.RED, "初始");
     }
 
-    void setConfiguredBorderFinalFromCorner(Location corner) {
-        Location center = getArenaSpawn();
-        if (!center.getWorld().equals(corner.getWorld())) return;
-        double width = Math.max(1.0, Math.abs(corner.getX() - center.getX()) * 2.0);
-        double depth = Math.max(1.0, Math.abs(corner.getZ() - center.getZ()) * 2.0);
-        getConfig().set("worldBorder.finalWidth", roundToOneDecimal(width));
-        getConfig().set("worldBorder.finalDepth", roundToOneDecimal(depth));
-        getConfig().set("worldBorder.initialWidth", roundToOneDecimal(Math.max(configuredBorderInitialWidth(), width)));
-        getConfig().set("worldBorder.initialDepth", roundToOneDecimal(Math.max(configuredBorderInitialDepth(), depth)));
-        saveAndReloadRuntimeConfig();
+    BorderSelectionResult setConfiguredBorderFinalFromCorners(Location first, Location second) {
+        return saveConfiguredBorderFromCorners("finalBorder", first, second, NamedTextColor.GREEN, "最终");
     }
 
     boolean canUseBorderCorner(Location corner) {
-        return getArenaSpawn().getWorld().equals(corner.getWorld());
+        return getConfiguredPresetSpawn().getWorld().equals(corner.getWorld());
     }
 
     void renderConfiguredBorderPreview(Player viewer) {
         if (!canUseBorderCorner(viewer.getLocation())) return;
-        Location center = getArenaSpawn();
-        renderSpawnMarkerFor(viewer, center);
-        BorderRectangle initial = new BorderRectangle(center.getX(), center.getZ(), configuredBorderInitialWidth(), configuredBorderInitialDepth());
-        BorderRectangle fin = new BorderRectangle(center.getX(), center.getZ(), configuredBorderFinalWidth(), configuredBorderFinalDepth());
+        renderSpawnMarkerFor(viewer, getConfiguredPresetSpawn());
+        BorderRectangle initial = configuredInitialBorder();
+        BorderRectangle fin = configuredFinalBorder();
         renderPreviewRectangleFor(viewer, initial, new Particle.DustOptions(Color.RED, 1.85f));
         renderPreviewRectangleFor(viewer, fin, new Particle.DustOptions(Color.LIME, 1.55f));
     }
@@ -591,12 +612,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     String arenaSpawnSummary() {
-        Location spawn = getArenaSpawn();
+        Location spawn = getConfiguredPresetSpawn();
         return spawn.getWorld().getName() + " (" + Math.round(spawn.getX()) + ", " + Math.round(spawn.getY()) + ", " + Math.round(spawn.getZ()) + ")";
     }
 
     String borderStatusSummary() {
-        return "初始 " + (int) Math.round(configuredBorderInitialWidth()) + " x " + (int) Math.round(configuredBorderInitialDepth())
+        return "预设 " + currentPresetLabel()
+                + " | 初始 " + (int) Math.round(configuredBorderInitialWidth()) + " x " + (int) Math.round(configuredBorderInitialDepth())
                 + " / 最终 " + (int) Math.round(configuredBorderFinalWidth()) + " x " + (int) Math.round(configuredBorderFinalDepth());
     }
 
@@ -607,8 +629,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void saveAndReloadRuntimeConfig() {
         saveConfig();
+        loadPresetState();
         settings = loadSettings();
-        loadSpawn();
     }
 
     private double roundToOneDecimal(double value) {
@@ -738,8 +760,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             sender.sendMessage("至少需要 2 名在线玩家才能开始游戏。");
             return;
         }
+        if (presets.isEmpty()) {
+            sender.sendMessage("当前没有可用的地图预设。");
+            return;
+        }
 
         stopGame(false);
+        List<ArenaPreset> availablePresets = new ArrayList<>(presets.values());
+        currentMatchPreset = availablePresets.get(ThreadLocalRandom.current().nextInt(availablePresets.size()));
+        settings = loadSettings(currentMatchPreset);
         Location spawn = getArenaSpawn();
         remainingTicks = settings.durationTicks();
         phase = GamePhase.RUNNING;
@@ -764,6 +793,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
         setupWorldBorder(spawn);
         spawnJailCell(spawn);
+        Bukkit.broadcast(Component.text("本局预设: " + currentMatchPreset.key(), NamedTextColor.YELLOW));
         Bukkit.broadcast(Component.text("躲猫猫开始！前 30 秒寻找者等待，躲藏者快藏好。", NamedTextColor.GOLD));
         gameTask = Bukkit.getScheduler().runTaskTimer(this, this::tickGame, 1L, 1L);
     }
@@ -1013,18 +1043,21 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (world != null) world.getWorldBorder().changeSize(settings.borderResetSize(), 0L);
         borderState = null;
         jailCellOpenTicks = -1;
+        currentMatchPreset = null;
         phase = GamePhase.IDLE;
         remainingTicks = 0;
+        settings = loadSettings();
         applyIdleStateToArenaPlayers();
         if (announce) Bukkit.broadcast(Component.text("躲猫猫已停止。", NamedTextColor.YELLOW));
     }
 
     private void setupWorldBorder(Location center) {
         WorldBorder border = center.getWorld().getWorldBorder();
-        border.setCenter(center);
+        BorderRectangle initialBorder = currentArenaPreset().initialBorder();
+        border.setCenter(initialBorder.centerX(), initialBorder.centerZ());
         border.changeSize(settings.borderResetSize(), 0L);
         border.setDamageBuffer(settings.borderDamageBuffer());
-        borderState = new BorderState(center.getX(), center.getZ(), settings.borderInitialWidth(), settings.borderInitialDepth());
+        borderState = new BorderState(initialBorder.centerX(), initialBorder.centerZ(), initialBorder.width(), initialBorder.depth());
         borderParticleTick = 0;
     }
 
@@ -1922,8 +1955,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private boolean isInArenaWorld(Player player) {
-        World world = getArenaSpawn().getWorld();
-        return world != null && player.getWorld().equals(world);
+        return presets.values().stream()
+                .map(preset -> preset.spawn().getWorld())
+                .filter(Objects::nonNull)
+                .anyMatch(world -> world.equals(player.getWorld()));
     }
 
     private void applyIdleState(Player player) {
@@ -2115,20 +2150,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private BorderRectangle prepareNextBorder(BorderStage stage) {
         return pendingBorders.computeIfAbsent(stage.remainingTicks(), ignored -> {
-            BorderRectangle current = borderState == null
-                    ? new BorderRectangle(getArenaSpawn().getX(), getArenaSpawn().getZ(), settings.borderInitialWidth(), settings.borderInitialDepth())
-                    : borderState.current();
-            double halfXRange = Math.max(0.0, (current.width() - stage.width()) / 2.0);
-            double halfZRange = Math.max(0.0, (current.depth() - stage.depth()) / 2.0);
-            double centerX = randomBetween(current.centerX() - halfXRange, current.centerX() + halfXRange);
-            double centerZ = randomBetween(current.centerZ() - halfZRange, current.centerZ() + halfZRange);
-            return new BorderRectangle(centerX, centerZ, stage.width(), stage.depth());
+            ArenaPreset preset = currentArenaPreset();
+            if (preset == null) return borderState == null ? configuredInitialBorder() : borderState.current();
+            return BorderRectangle.lerp(preset.initialBorder(), preset.finalBorder(), stage.progress());
         });
-    }
-
-    private double randomBetween(double min, double max) {
-        if (max <= min) return min;
-        return ThreadLocalRandom.current().nextDouble(min, max);
     }
 
     private void announceNextBorder(BorderStage stage, BorderRectangle next) {
@@ -2329,43 +2354,108 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return Objects.requireNonNull(player.getAttribute(Attribute.MAX_HEALTH)).getValue();
     }
 
+    String currentPresetLabel() {
+        ArenaPreset preset = editingPreset();
+        return preset == null ? "default" : preset.key();
+    }
+
+    List<String> presetKeys() {
+        return List.copyOf(presets.keySet());
+    }
+
+    boolean selectPreset(String rawKey) {
+        String key = normalizePresetKey(rawKey);
+        if (key == null || !presets.containsKey(key)) return false;
+        selectedPresetKey = key;
+        getConfig().set("editor.selectedPreset", key);
+        saveAndReloadRuntimeConfig();
+        return true;
+    }
+
+    String createPreset(String rawKey) {
+        String key = normalizePresetKey(rawKey);
+        if (key == null || presets.containsKey(key)) return null;
+        ArenaPreset base = editingPreset();
+        if (base == null) return null;
+        writePreset(key, base.spawn(), base.initialBorder(), base.finalBorder());
+        getConfig().set("editor.selectedPreset", key);
+        saveAndReloadRuntimeConfig();
+        return key;
+    }
+
+    String deletePreset(String rawKey) {
+        String key = normalizePresetKey(rawKey);
+        if (key == null || !presets.containsKey(key) || presets.size() <= 1) return null;
+        getConfig().set("presets." + key, null);
+        if (key.equals(selectedPresetKey)) {
+            selectedPresetKey = presets.keySet().stream().filter(existing -> !existing.equals(key)).findFirst().orElse("default");
+            getConfig().set("editor.selectedPreset", selectedPresetKey);
+        }
+        saveAndReloadRuntimeConfig();
+        return key;
+    }
+
     private Location getArenaSpawn() {
-        if (arenaSpawn != null) return arenaSpawn.clone();
+        ArenaPreset preset = currentArenaPreset();
+        if (preset != null) return preset.spawn().clone();
         World world = Bukkit.getWorlds().getFirst();
         return world.getSpawnLocation();
     }
 
-    private void loadSpawn() {
-        if (!getConfig().contains("arena.world")) return;
-        World world = Bukkit.getWorld(getConfig().getString("arena.world", ""));
-        if (world == null) return;
-        arenaSpawn = new Location(
-                world,
-                getConfig().getDouble("arena.x"),
-                getConfig().getDouble("arena.y"),
-                getConfig().getDouble("arena.z"),
-                (float) getConfig().getDouble("arena.yaw"),
-                (float) getConfig().getDouble("arena.pitch")
-        );
+    private Location getConfiguredPresetSpawn() {
+        ArenaPreset preset = editingPreset();
+        if (preset != null) return preset.spawn().clone();
+        return getArenaSpawn();
+    }
+
+    private void loadPresetState() {
+        presets.clear();
+        ConfigurationSection section = getConfig().getConfigurationSection("presets");
+        if (section != null) {
+            for (String key : section.getKeys(false)) {
+                ConfigurationSection presetSection = section.getConfigurationSection(key);
+                if (presetSection == null) continue;
+                ArenaPreset preset = loadPreset(key, presetSection);
+                if (preset != null) presets.put(key, preset);
+            }
+        }
+        if (presets.isEmpty()) {
+            ArenaPreset fallback = fallbackPreset("default");
+            presets.put(fallback.key(), fallback);
+        }
+        String configuredKey = getConfig().getString("editor.selectedPreset", selectedPresetKey);
+        if (configuredKey != null && presets.containsKey(configuredKey)) {
+            selectedPresetKey = configuredKey;
+        }
+        if (selectedPresetKey == null || !presets.containsKey(selectedPresetKey)) {
+            selectedPresetKey = presets.keySet().iterator().next();
+            getConfig().set("editor.selectedPreset", selectedPresetKey);
+        }
+        if (currentMatchPreset != null) {
+            currentMatchPreset = presets.getOrDefault(currentMatchPreset.key(), currentMatchPreset);
+        }
     }
 
     private void saveSpawn(Location location) {
-        getConfig().set("arena.world", location.getWorld().getName());
-        getConfig().set("arena.x", location.getX());
-        getConfig().set("arena.y", location.getY());
-        getConfig().set("arena.z", location.getZ());
-        getConfig().set("arena.yaw", location.getYaw());
-        getConfig().set("arena.pitch", location.getPitch());
-        saveConfig();
+        ArenaPreset preset = editingPreset();
+        BorderRectangle initial = preset == null ? defaultInitialBorder(location) : preset.initialBorder();
+        BorderRectangle fin = preset == null ? defaultFinalBorder(location, initial) : preset.finalBorder();
+        writePreset(currentPresetLabel(), location, initial, fin);
+        saveAndReloadRuntimeConfig();
     }
 
     private GameSettings loadSettings() {
+        return loadSettings(currentArenaPreset());
+    }
+
+    private GameSettings loadSettings(ArenaPreset preset) {
         int durationTicks = positiveInt("game.durationTicks");
         int seekerReleaseDelayTicks = nonNegativeInt("game.seekerReleaseDelayTicks");
-        double borderInitialWidth = positiveDoubleWithFallback("worldBorder.initialWidth", "worldBorder.initialSize");
-        double borderInitialDepth = positiveDoubleWithFallback("worldBorder.initialDepth", "worldBorder.initialSize");
-        double borderFinalWidth = loadBorderFinalDimension("worldBorder.finalWidth", "worldBorder.finalSize", "width", borderInitialWidth * 40.0 / 128.0);
-        double borderFinalDepth = loadBorderFinalDimension("worldBorder.finalDepth", "worldBorder.finalSize", "depth", borderInitialDepth * 40.0 / 128.0);
+        ArenaPreset resolvedPreset = preset == null ? fallbackPreset("default") : preset;
+        double borderInitialWidth = resolvedPreset.initialBorder().width();
+        double borderInitialDepth = resolvedPreset.initialBorder().depth();
+        double borderFinalWidth = resolvedPreset.finalBorder().width();
+        double borderFinalDepth = resolvedPreset.finalBorder().depth();
         return new GameSettings(
                 durationTicks,
                 Math.max(1, getConfig().getInt("game.seekerCount")),
@@ -2423,6 +2513,179 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         );
     }
 
+    private void migrateLegacyPresetConfigIfNeeded() {
+        ConfigurationSection presetsSection = getConfig().getConfigurationSection("presets");
+        if (presetsSection != null && !presetsSection.getKeys(false).isEmpty()) return;
+        Location spawn = loadLegacySpawnOrDefault();
+        BorderRectangle initial = new BorderRectangle(
+                spawn.getX(),
+                spawn.getZ(),
+                positiveDoubleWithFallback("worldBorder.initialWidth", "worldBorder.initialSize"),
+                positiveDoubleWithFallback("worldBorder.initialDepth", "worldBorder.initialSize")
+        );
+        BorderRectangle fin = new BorderRectangle(
+                spawn.getX(),
+                spawn.getZ(),
+                loadBorderFinalDimension("worldBorder.finalWidth", "worldBorder.finalSize", "width", initial.width()),
+                loadBorderFinalDimension("worldBorder.finalDepth", "worldBorder.finalSize", "depth", initial.depth())
+        );
+        writePreset("default", spawn, initial, fin);
+        getConfig().set("editor.selectedPreset", "default");
+    }
+
+    private ArenaPreset currentArenaPreset() {
+        return currentMatchPreset != null ? currentMatchPreset : editingPreset();
+    }
+
+    private ArenaPreset editingPreset() {
+        if (selectedPresetKey != null && presets.containsKey(selectedPresetKey)) {
+            return presets.get(selectedPresetKey);
+        }
+        return presets.values().stream().findFirst().orElse(null);
+    }
+
+    private BorderRectangle configuredInitialBorder() {
+        ArenaPreset preset = editingPreset();
+        return preset == null ? fallbackPreset("default").initialBorder() : preset.initialBorder();
+    }
+
+    private BorderRectangle configuredFinalBorder() {
+        ArenaPreset preset = editingPreset();
+        return preset == null ? fallbackPreset("default").finalBorder() : preset.finalBorder();
+    }
+
+    private ArenaPreset loadPreset(String key, ConfigurationSection presetSection) {
+        Location spawn = loadPresetSpawn(presetSection.getConfigurationSection("spawn"));
+        if (spawn == null) return null;
+        BorderRectangle initial = loadPresetBorder(presetSection.getConfigurationSection("initialBorder"), spawn);
+        BorderRectangle fin = loadPresetBorder(presetSection.getConfigurationSection("finalBorder"), spawn);
+        return new ArenaPreset(key, spawn, initial, fin);
+    }
+
+    private Location loadPresetSpawn(ConfigurationSection spawnSection) {
+        if (spawnSection == null) return null;
+        World world = Bukkit.getWorld(spawnSection.getString("world", ""));
+        if (world == null) return null;
+        return new Location(
+                world,
+                spawnSection.getDouble("x"),
+                spawnSection.getDouble("y"),
+                spawnSection.getDouble("z"),
+                (float) spawnSection.getDouble("yaw"),
+                (float) spawnSection.getDouble("pitch")
+        );
+    }
+
+    private BorderRectangle loadPresetBorder(ConfigurationSection section, Location spawn) {
+        if (section == null) return defaultInitialBorder(spawn);
+        double minX = section.getDouble("minX", spawn.getX() - 64.0);
+        double maxX = section.getDouble("maxX", spawn.getX() + 64.0);
+        double minZ = section.getDouble("minZ", spawn.getZ() - 64.0);
+        double maxZ = section.getDouble("maxZ", spawn.getZ() + 64.0);
+        return rectangleFromBounds(minX, maxX, minZ, maxZ);
+    }
+
+    private ArenaPreset fallbackPreset(String key) {
+        Location spawn = loadLegacySpawnOrDefault();
+        BorderRectangle initial = defaultInitialBorder(spawn);
+        BorderRectangle fin = defaultFinalBorder(spawn, initial);
+        return new ArenaPreset(key, spawn, initial, fin);
+    }
+
+    private Location loadLegacySpawnOrDefault() {
+        if (getConfig().contains("arena.world")) {
+            World world = Bukkit.getWorld(getConfig().getString("arena.world", ""));
+            if (world != null) {
+                return new Location(
+                        world,
+                        getConfig().getDouble("arena.x"),
+                        getConfig().getDouble("arena.y"),
+                        getConfig().getDouble("arena.z"),
+                        (float) getConfig().getDouble("arena.yaw"),
+                        (float) getConfig().getDouble("arena.pitch")
+                );
+            }
+        }
+        World world = Bukkit.getWorlds().getFirst();
+        return world.getSpawnLocation();
+    }
+
+    private BorderRectangle defaultInitialBorder(Location spawn) {
+        return new BorderRectangle(
+                spawn.getX(),
+                spawn.getZ(),
+                positiveDoubleWithFallback("worldBorder.initialWidth", "worldBorder.initialSize"),
+                positiveDoubleWithFallback("worldBorder.initialDepth", "worldBorder.initialSize")
+        );
+    }
+
+    private BorderRectangle defaultFinalBorder(Location spawn, BorderRectangle initial) {
+        return new BorderRectangle(
+                spawn.getX(),
+                spawn.getZ(),
+                loadBorderFinalDimension("worldBorder.finalWidth", "worldBorder.finalSize", "width", initial.width()),
+                loadBorderFinalDimension("worldBorder.finalDepth", "worldBorder.finalSize", "depth", initial.depth())
+        );
+    }
+
+    private void writePreset(String key, Location spawn, BorderRectangle initial, BorderRectangle fin) {
+        String path = "presets." + key;
+        getConfig().set(path + ".spawn.world", spawn.getWorld().getName());
+        getConfig().set(path + ".spawn.x", spawn.getX());
+        getConfig().set(path + ".spawn.y", spawn.getY());
+        getConfig().set(path + ".spawn.z", spawn.getZ());
+        getConfig().set(path + ".spawn.yaw", spawn.getYaw());
+        getConfig().set(path + ".spawn.pitch", spawn.getPitch());
+        saveBorderRectangle(path + ".initialBorder", initial);
+        saveBorderRectangle(path + ".finalBorder", fin);
+    }
+
+    private void saveBorderRectangle(String path, BorderRectangle rectangle) {
+        getConfig().set(path + ".minX", roundToOneDecimal(rectangle.minX()));
+        getConfig().set(path + ".maxX", roundToOneDecimal(rectangle.maxX()));
+        getConfig().set(path + ".minZ", roundToOneDecimal(rectangle.minZ()));
+        getConfig().set(path + ".maxZ", roundToOneDecimal(rectangle.maxZ()));
+    }
+
+    private BorderSelectionResult saveConfiguredBorderFromCorners(String borderKey, Location first, Location second, NamedTextColor color, String label) {
+        if (!first.getWorld().equals(second.getWorld())) {
+            return new BorderSelectionResult(false, "两个角点必须在同一个世界。", NamedTextColor.RED);
+        }
+        ArenaPreset preset = editingPreset();
+        if (preset == null || !preset.spawn().getWorld().equals(first.getWorld())) {
+            return new BorderSelectionResult(false, "角点必须与当前预设出生点在同一个世界。", NamedTextColor.RED);
+        }
+        BorderRectangle rectangle = rectangleFromCorners(first, second);
+        String path = "presets." + currentPresetLabel() + "." + borderKey;
+        saveBorderRectangle(path, rectangle);
+        saveAndReloadRuntimeConfig();
+        return new BorderSelectionResult(true,
+                "已保存当前预设的" + label + "边界: "
+                        + Math.round(rectangle.width()) + " x " + Math.round(rectangle.depth()),
+                color);
+    }
+
+    private BorderRectangle rectangleFromCorners(Location first, Location second) {
+        return rectangleFromBounds(
+                Math.min(first.getX(), second.getX()),
+                Math.max(first.getX(), second.getX()),
+                Math.min(first.getZ(), second.getZ()),
+                Math.max(first.getZ(), second.getZ())
+        );
+    }
+
+    private BorderRectangle rectangleFromBounds(double minX, double maxX, double minZ, double maxZ) {
+        double width = Math.max(1.0, maxX - minX);
+        double depth = Math.max(1.0, maxZ - minZ);
+        return new BorderRectangle((minX + maxX) / 2.0, (minZ + maxZ) / 2.0, width, depth);
+    }
+
+    private String normalizePresetKey(String rawKey) {
+        String key = rawKey.toLowerCase(Locale.ROOT).trim();
+        if (key.isEmpty() || !key.matches("[a-z0-9_-]+")) return null;
+        return key;
+    }
+
     private double loadBorderFinalDimension(String path, String fallbackPath, String stageKey, double fallbackValue) {
         if (getConfig().contains(path)) return positiveDouble(path);
         if (getConfig().contains(fallbackPath)) return positiveDouble(fallbackPath);
@@ -2439,17 +2702,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private List<BorderStage> generateBorderStages(double initialWidth, double initialDepth, double finalWidth, double finalDepth) {
         List<BorderStage> stages = new ArrayList<>();
-        double widthDelta = Math.max(0.0, initialWidth - finalWidth);
-        double depthDelta = Math.max(0.0, initialDepth - finalDepth);
         for (int i = 0; i < ORIGINAL_BORDER_STAGE_TICKS.length; i++) {
-            double progress = ORIGINAL_BORDER_STAGE_PROGRESS[i];
-            double stageWidth = i == ORIGINAL_BORDER_STAGE_TICKS.length - 1
-                    ? finalWidth
-                    : Math.max(finalWidth, initialWidth - widthDelta * progress);
-            double stageDepth = i == ORIGINAL_BORDER_STAGE_TICKS.length - 1
-                    ? finalDepth
-                    : Math.max(finalDepth, initialDepth - depthDelta * progress);
-            stages.add(new BorderStage(ORIGINAL_BORDER_STAGE_TICKS[i], stageWidth, stageDepth, BORDER_STAGE_SECONDS));
+            stages.add(new BorderStage(ORIGINAL_BORDER_STAGE_TICKS[i], ORIGINAL_BORDER_STAGE_PROGRESS[i], BORDER_STAGE_SECONDS));
         }
         return List.copyOf(stages);
     }
@@ -2584,7 +2838,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     ) {
     }
 
-    private record BorderStage(int remainingTicks, double width, double depth, long seconds) {
+    private record BorderStage(int remainingTicks, double progress, long seconds) {
+    }
+
+    record BorderSelectionResult(boolean completed, String message, NamedTextColor color) {
+    }
+
+    private record ArenaPreset(String key, Location spawn, BorderRectangle initialBorder, BorderRectangle finalBorder) {
     }
 
     private record ResultSnapshot(List<Player> initialSeekers, List<Player> joinedSeekers, List<Player> hiders) {
@@ -2696,6 +2956,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private record BorderRectangle(double centerX, double centerZ, double width, double depth) {
         private boolean contains(double x, double z) {
             return x >= minX() && x <= maxX() && z >= minZ() && z <= maxZ();
+        }
+
+        private static BorderRectangle lerp(BorderRectangle start, BorderRectangle end, double progress) {
+            return new BorderRectangle(
+                    start.centerX + (end.centerX - start.centerX) * progress,
+                    start.centerZ + (end.centerZ - start.centerZ) * progress,
+                    start.width + (end.width - start.width) * progress,
+                    start.depth + (end.depth - start.depth) * progress
+            );
         }
 
         private double minX() {

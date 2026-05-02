@@ -6,6 +6,7 @@ import org.bukkit.GameMode;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
+import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -40,6 +41,8 @@ final class AdminController implements Listener {
     private final NamespacedKey adminToolKey;
     private final Set<UUID> admins = ConcurrentHashMap.newKeySet();
     private final Map<UUID, BukkitTask> previewTasks = new ConcurrentHashMap<>();
+    private final Map<UUID, CornerSelection> initialCornerSelections = new ConcurrentHashMap<>();
+    private final Map<UUID, CornerSelection> finalCornerSelections = new ConcurrentHashMap<>();
 
     AdminController(Hide_and_seek plugin) {
         this.plugin = plugin;
@@ -103,6 +106,8 @@ final class AdminController implements Listener {
     public void onQuit(PlayerQuitEvent event) {
         admins.remove(event.getPlayer().getUniqueId());
         cancelPreview(event.getPlayer().getUniqueId());
+        initialCornerSelections.remove(event.getPlayer().getUniqueId());
+        finalCornerSelections.remove(event.getPlayer().getUniqueId());
     }
 
     @EventHandler
@@ -226,20 +231,14 @@ final class AdminController implements Listener {
                     feedback(player, "请先回到小游戏出生点所在世界。", NamedTextColor.RED);
                     return;
                 }
-                plugin.setConfiguredBorderInitialFromCorner(player.getLocation());
-                startPreview(player);
-                feedback(player, "已使用当前位置设置初始边界角点，并开始预览。", NamedTextColor.YELLOW);
-                sendPreviewLegend(player);
+                handleCornerSelection(player, true);
             }
             case SET_FINAL_CORNER -> {
                 if (!plugin.canUseBorderCorner(player.getLocation())) {
                     feedback(player, "请先回到小游戏出生点所在世界。", NamedTextColor.RED);
                     return;
                 }
-                plugin.setConfiguredBorderFinalFromCorner(player.getLocation());
-                startPreview(player);
-                feedback(player, "已使用当前位置设置最终边界角点，并开始预览。", NamedTextColor.GOLD);
-                sendPreviewLegend(player);
+                handleCornerSelection(player, false);
             }
             case PREVIEW_BORDERS -> {
                 startPreview(player);
@@ -315,6 +314,32 @@ final class AdminController implements Listener {
         if (task != null) task.cancel();
     }
 
+    private void handleCornerSelection(Player player, boolean initial) {
+        Map<UUID, CornerSelection> selections = initial ? initialCornerSelections : finalCornerSelections;
+        String presetKey = plugin.currentPresetLabel();
+        CornerSelection existing = selections.get(player.getUniqueId());
+        if (existing == null || !existing.presetKey().equals(presetKey)
+                || !existing.location().getWorld().equals(player.getWorld())) {
+            selections.put(player.getUniqueId(), new CornerSelection(presetKey, player.getLocation().clone()));
+            feedback(player,
+                    "已记录" + (initial ? "初始" : "最终") + "边界第一个角点，请移动到对角后再次右键。",
+                    initial ? NamedTextColor.YELLOW : NamedTextColor.GOLD);
+            return;
+        }
+
+        selections.remove(player.getUniqueId());
+        Hide_and_seek.BorderSelectionResult result = initial
+                ? plugin.setConfiguredBorderInitialFromCorners(existing.location(), player.getLocation())
+                : plugin.setConfiguredBorderFinalFromCorners(existing.location(), player.getLocation());
+        if (result.completed()) {
+            startPreview(player);
+            feedback(player, result.message(), result.color());
+            sendPreviewLegend(player);
+            return;
+        }
+        feedback(player, result.message(), result.color());
+    }
+
     private void feedback(Player player, String message, NamedTextColor color) {
         click(player);
         player.sendMessage(Component.text(message, color));
@@ -370,8 +395,8 @@ final class AdminController implements Listener {
         START_GAME(2, Material.LIME_WOOL, "开始游戏", NamedTextColor.GREEN, List.of("右键后会离开管理员模式", "并作为普通玩家加入本局")),
         STOP_GAME(3, Material.RED_WOOL, "结束游戏", NamedTextColor.RED, List.of("右键立即结束当前对局")),
         SET_SPAWN(4, Material.RECOVERY_COMPASS, "设置出生点", NamedTextColor.YELLOW, List.of("右键将当前位置设为小游戏出生点")),
-        SET_INITIAL_CORNER(5, Material.RED_DYE, "设置初始角点", NamedTextColor.RED, List.of("右键用当前位置设置初始边界", "会自动显示出生点和边界预览")),
-        SET_FINAL_CORNER(6, Material.LIME_DYE, "设置最终角点", NamedTextColor.GOLD, List.of("右键用当前位置设置最终边界", "会自动显示出生点和边界预览")),
+        SET_INITIAL_CORNER(5, Material.RED_DYE, "设置初始边界", NamedTextColor.RED, List.of("第一次右键记录第一个角点", "第二次右键完成初始矩形")),
+        SET_FINAL_CORNER(6, Material.LIME_DYE, "设置最终边界", NamedTextColor.GOLD, List.of("第一次右键记录第一个角点", "第二次右键完成最终矩形")),
         PREVIEW_BORDERS(7, Material.SPYGLASS, "预览边界", NamedTextColor.AQUA, List.of("右键显示出生点光柱", "并预览初始与最终边界 10 秒")),
         OPEN_MENU(8, Material.NETHER_STAR, "寻找者设置", NamedTextColor.GOLD, List.of("右键打开单行设置栏", "只调整寻找者人数"));
 
@@ -412,5 +437,8 @@ final class AdminController implements Listener {
         boolean triggersPreviewAssist() {
             return this == SET_SPAWN || this == SET_INITIAL_CORNER || this == SET_FINAL_CORNER || this == PREVIEW_BORDERS;
         }
+    }
+
+    private record CornerSelection(String presetKey, Location location) {
     }
 }

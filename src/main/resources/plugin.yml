@@ -7,7 +7,7 @@ load: POSTWORLD
 commands:
   has:
     description: Hide and Seek game command
-    usage: /has <help|start|stop|setspawn|status|menu|reload|settings|blacklist>
+    usage: /has <help|start|stop|setspawn|status|menu|reload|preset|settings|blacklist>
     aliases:
       - hideandseek
       - hs
