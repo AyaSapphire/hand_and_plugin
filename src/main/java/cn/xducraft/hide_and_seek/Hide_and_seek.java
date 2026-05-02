@@ -817,6 +817,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         for (GamePlayer state : players.values()) {
             Player player = Bukkit.getPlayer(state.uuid);
             if (player == null) continue;
+            if (state.vanillaHazardCooldownTicks > 0) state.vanillaHazardCooldownTicks--;
             applyGameState(player, false);
             state.hp = Math.min(settings.maxHp(), state.hp + settings.hpRegenPerTick());
             state.mp = Math.min(settings.maxMp(), state.mp + settings.mpRegenPerTick());
@@ -1113,7 +1114,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         inv.setItem(0, abilityItem("disguise", "伪装", List.of("右键目标方块进行伪装")));
         inv.setItem(1, abilityItem("release", "解除伪装", List.of("右键恢复原形")));
         inv.setItem(2, abilityItem("rotation_lock", "旋转锁定", List.of("右键切换伪装旋转锁定")));
-        inv.setItem(3, abilityItem("decoy", "诱饵", List.of("消耗 MP 放置一个伪装诱饵")));
+        inv.setItem(3, abilityItem("decoy", "诱饵", List.of("原地召唤一个伪装诱饵", "潜行使用会放置静止诱饵")));
         inv.setItem(4, abilityItem("fly_hider", "躲藏者跳跃", List.of("解除伪装并向视线方向位移")));
     }
 
@@ -1129,7 +1130,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             ensureAbility(player, 0, "disguise", "伪装", List.of("右键目标方块进行伪装"));
             ensureAbility(player, 1, "release", "解除伪装", List.of("右键恢复原形"));
             ensureAbility(player, 2, "rotation_lock", "旋转锁定", List.of("右键切换伪装旋转锁定"));
-            ensureAbility(player, 3, "decoy", "诱饵", List.of("消耗 MP 放置一个伪装诱饵"));
+            ensureAbility(player, 3, "decoy", "诱饵", List.of("原地召唤一个伪装诱饵", "潜行使用会放置静止诱饵"));
             ensureAbility(player, 4, "fly_hider", "躲藏者跳跃", List.of("解除伪装并向视线方向位移"));
         } else {
             ensureAbility(player, 0, "attack_bullet", "攻击弹", List.of("命中躲藏者造成伤害"));
@@ -1287,17 +1288,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             return;
         }
         if (!consumeMp(player, state, settings.decoyMp())) return;
-
-        Snowball projectile = player.launchProjectile(Snowball.class);
-        projectile.setItem(resourcePackItem(Material.SNOWBALL, NamespacedKey.minecraft(".empty")));
-        projectile.setVelocity(player.getEyeLocation().getDirection().normalize().multiply(settings.decoyThrowSpeed()));
-        projectile.getPersistentDataContainer().set(decoyProjectileKey, PersistentDataType.BYTE, (byte) 1);
-        decoyProjectiles.put(projectile.getUniqueId(), new DecoyProjectile(
-                player.getUniqueId(),
-                state.disguiseData,
-                state.lockedYaw
-        ));
-        player.playSound(player.getLocation(), Sound.ENTITY_SNOWBALL_THROW, 1f, 0.8f);
+        Location location = player.getLocation().clone();
+        location.setYaw(0f);
+        location.setPitch(0f);
+        boolean mobile = !player.isSneaking();
+        spawnDecoy(location, player.getUniqueId(), state.disguiseData, state.lockedYaw, mobile);
+        player.playSound(player.getLocation(), Sound.BLOCK_STONE_PLACE, 0.8f, 1.1f);
     }
 
     private void useFly(Player player, GamePlayer state, Role requiredRole, int cost, double power, double minYBoost) {
@@ -1385,6 +1381,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             return;
         }
         event.setCancelled(true);
+        if (isContinuousHazard(event.getCause())) {
+            if (state.vanillaHazardCooldownTicks > 0) return;
+            state.vanillaHazardCooldownTicks = vanillaHazardCooldownTicks(event.getCause());
+        }
         int damage = customDamageFromVanilla(event, state);
         if (damage <= 0) return;
         damagePlayer(player, state, damage);
@@ -1411,6 +1411,21 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             damage = Math.max(1, (int) Math.round(damage * settings.seekerDamageTakenScale()));
         }
         return damage;
+    }
+
+    private boolean isContinuousHazard(EntityDamageEvent.DamageCause cause) {
+        return switch (cause) {
+            case HOT_FLOOR, FIRE, FIRE_TICK, LAVA, CONTACT, FREEZE -> true;
+            default -> false;
+        };
+    }
+
+    private int vanillaHazardCooldownTicks(EntityDamageEvent.DamageCause cause) {
+        return switch (cause) {
+            case HOT_FLOOR, FIRE, FIRE_TICK, LAVA -> 20;
+            case CONTACT, FREEZE -> 10;
+            default -> 0;
+        };
     }
 
     private boolean isPreReleaseSeekerAttack(EntityDamageByEntityEvent event) {
@@ -1618,7 +1633,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void tickDecoyMovement(Decoy decoy) {
-        if (decoy.display == null) return;
+        if (decoy.display == null || !decoy.mobile) return;
         if (decoy.moveTicksRemaining > 0) {
             Location loc = decoy.display.getLocation();
             Location next = loc.clone().add(decoy.moveDirection);
@@ -1627,19 +1642,34 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 applyDisguiseTransform(decoy.display, decoy.yaw);
             } else {
                 decoy.moveTicksRemaining = 0;
-                decoy.nextMoveTicks = settings.decoyMoveIntervalTicks();
+                decoy.nextMoveTicks = randomDecoyMoveDelayTicks();
             }
             decoy.moveTicksRemaining--;
+            if (decoy.moveTicksRemaining <= 0) {
+                decoy.nextMoveTicks = randomDecoyMoveDelayTicks();
+            }
             return;
         }
 
-        decoy.nextMoveTicks--;
-        if (decoy.nextMoveTicks > 0) return;
+        if (decoy.nextMoveTicks > 0) {
+            decoy.nextMoveTicks--;
+            return;
+        }
         double radians = ThreadLocalRandom.current().nextDouble(Math.PI * 2.0);
         decoy.moveDirection = new Vector(Math.cos(radians), 0.0, Math.sin(radians)).multiply(settings.decoyMoveSpeed());
         decoy.yaw = normalizeYaw((float) Math.toDegrees(Math.atan2(-decoy.moveDirection.getX(), decoy.moveDirection.getZ())));
-        decoy.moveTicksRemaining = settings.decoyMoveDurationTicks();
-        decoy.nextMoveTicks = settings.decoyMoveIntervalTicks();
+        decoy.moveTicksRemaining = randomDecoyMoveDurationTicks();
+        if (decoy.moveTicksRemaining <= 0) {
+            decoy.nextMoveTicks = randomDecoyMoveDelayTicks();
+        }
+    }
+
+    private int randomDecoyMoveDelayTicks() {
+        return ThreadLocalRandom.current().nextInt(settings.decoyMoveDelayTicks() + 1);
+    }
+
+    private int randomDecoyMoveDurationTicks() {
+        return ThreadLocalRandom.current().nextInt(settings.decoyMoveDurationTicks() + 1);
     }
 
     private boolean canMoveDecoyTo(Location location) {
@@ -1661,17 +1691,20 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void spawnDecoy(Location location, DecoyProjectile decoyProjectile) {
+        spawnDecoy(location, decoyProjectile.owner, decoyProjectile.blockData, decoyProjectile.yaw, true);
+    }
+
+    private void spawnDecoy(Location location, UUID owner, BlockData blockData, float yaw, boolean mobile) {
         Location loc = location.clone();
         loc.setYaw(0f);
         loc.setPitch(0f);
         BlockDisplay display = loc.getWorld().spawn(loc, BlockDisplay.class, spawned -> {
-            spawned.setBlock(decoyProjectile.blockData);
+            spawned.setBlock(blockData);
             spawned.setPersistent(false);
-            applyDisguiseTransform(spawned, decoyProjectile.yaw);
+            applyDisguiseTransform(spawned, yaw);
         });
-        decoys.add(new Decoy(decoyProjectile.owner, display, settings.decoyHp(), settings.decoyLifetimeTicks(), decoyProjectile.yaw, settings.decoyMoveDelayTicks()));
-        loc.getWorld().spawnParticle(Particle.BLOCK, loc.clone().add(0, 0.5, 0), 18, 0.25, 0.25, 0.25, decoyProjectile.blockData);
-        loc.getWorld().playSound(loc, Sound.BLOCK_STONE_PLACE, 0.8f, 1.1f);
+        decoys.add(new Decoy(owner, display, settings.decoyHp(), settings.decoyLifetimeTicks(), yaw, randomDecoyMoveDelayTicks(), mobile));
+        loc.getWorld().spawnParticle(Particle.BLOCK, loc.clone().add(0, 0.5, 0), 18, 0.25, 0.25, 0.25, blockData);
     }
 
     private void eliminateHider(Player player, GamePlayer state) {
@@ -2556,6 +2589,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private int flyLockTicks;
         private int borderDamageTicks;
         private int airDamageTicks;
+        private int vanillaHazardCooldownTicks;
         private GamePlayer(UUID uuid, Role role, int hp, int mp) {
             this.uuid = uuid;
             this.role = role;
@@ -2570,6 +2604,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private static final class Decoy {
         private final UUID owner;
         private final BlockDisplay display;
+        private final boolean mobile;
         private int hp;
         private int remainingTicks;
         private float yaw;
@@ -2577,9 +2612,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private int moveTicksRemaining;
         private Vector moveDirection = new Vector(0, 0, 0);
 
-        private Decoy(UUID owner, BlockDisplay display, int hp, int remainingTicks, float yaw, int nextMoveTicks) {
+        private Decoy(UUID owner, BlockDisplay display, int hp, int remainingTicks, float yaw, int nextMoveTicks, boolean mobile) {
             this.owner = owner;
             this.display = display;
+            this.mobile = mobile;
             this.hp = hp;
             this.remainingTicks = remainingTicks;
             this.yaw = yaw;
