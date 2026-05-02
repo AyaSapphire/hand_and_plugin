@@ -681,10 +681,14 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void endGame(Role winner, String message) {
+        endGame(winner, message, resultSnapshot());
+    }
+
+    private void endGame(Role winner, String message, ResultSnapshot snapshot) {
         Component chatTitle = Component.text(message, winner == Role.HIDER ? NamedTextColor.GREEN : NamedTextColor.RED);
         Component visualTitle = systemGlyph(winner == Role.HIDER ? SYSTEM_HIDER_WIN : SYSTEM_SEEKER_WIN);
         Bukkit.broadcast(chatTitle);
-        broadcastResult(winner);
+        broadcastResult(winner, snapshot);
         for (Player player : Bukkit.getOnlinePlayers()) {
             showTitle(player, visualTitle, Component.empty(), 10, 70, 20);
             player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1f);
@@ -692,22 +696,26 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         stopGame(false);
     }
 
-    private void broadcastResult(Role winner) {
+    private ResultSnapshot resultSnapshot() {
+        return new ResultSnapshot(initialSeekerPlayers(), joinedSeekerPlayers(), playersWithRole(Role.HIDER));
+    }
+
+    private void broadcastResult(Role winner, ResultSnapshot snapshot) {
         Bukkit.broadcast(Component.text("[结果]", NamedTextColor.GOLD));
         Bukkit.broadcast(Component.text("获胜阵营：", NamedTextColor.WHITE)
                 .append(winner == Role.SEEKER
                         ? Component.text("寻找者(初)", NamedTextColor.RED)
                         : Component.text("躲藏者", NamedTextColor.AQUA)));
         Bukkit.broadcast(Component.text(" ", NamedTextColor.WHITE).append(winner == Role.SEEKER
-                ? playerList(initialSeekerPlayers(), NamedTextColor.RED)
-                : playerList(playersWithRole(Role.HIDER), NamedTextColor.AQUA)));
+                ? playerList(snapshot.initialSeekers(), NamedTextColor.RED)
+                : playerList(snapshot.hiders(), NamedTextColor.AQUA)));
         Bukkit.broadcast(Component.text("------------------------------", NamedTextColor.WHITE));
         Bukkit.broadcast(Component.text("<寻找者(初)>  ", NamedTextColor.RED)
-                .append(playerList(initialSeekerPlayers(), NamedTextColor.RED)));
+                .append(playerList(snapshot.initialSeekers(), NamedTextColor.RED)));
         Bukkit.broadcast(Component.text("<寻找者(增)>  ", NamedTextColor.RED)
-                .append(playerList(joinedSeekerPlayers(), NamedTextColor.RED)));
+                .append(playerList(snapshot.joinedSeekers(), NamedTextColor.RED)));
         Bukkit.broadcast(Component.text("躲藏者>    ", NamedTextColor.AQUA)
-                .append(playerList(playersWithRole(Role.HIDER), NamedTextColor.AQUA)));
+                .append(playerList(snapshot.hiders(), NamedTextColor.AQUA)));
     }
 
     private void stopGame(boolean announce) {
@@ -1433,10 +1441,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
         long hiders = players.values().stream().filter(candidate -> candidate.role == Role.HIDER).count();
         if (hiders <= 1) {
+            ResultSnapshot snapshot = resultSnapshot();
             players.remove(player.getUniqueId());
             if (bossBar != null) bossBar.removePlayer(player);
             cleanupPlayer(player, state);
-            endGame(Role.SEEKER, "寻找者胜利！");
+            endGame(Role.SEEKER, "寻找者胜利！", snapshot);
             return;
         }
         state.role = Role.SEEKER;
@@ -2221,6 +2230,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private record BorderStage(int remainingTicks, double width, double depth, long seconds) {
+    }
+
+    private record ResultSnapshot(List<Player> initialSeekers, List<Player> joinedSeekers, List<Player> hiders) {
     }
 
     private enum GamePhase {
