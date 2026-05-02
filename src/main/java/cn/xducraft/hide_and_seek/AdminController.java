@@ -134,7 +134,7 @@ final class AdminController implements Listener {
         new BukkitRunnable() {
             @Override
             public void run() {
-                settleAdminIntoSpectator(event.getPlayer(), true);
+                leaveAdminMode(event.getPlayer(), true);
             }
         }.runTask(plugin);
     }
@@ -352,13 +352,21 @@ final class AdminController implements Listener {
         }
     }
 
-    private void settleAdminIntoSpectator(Player player, boolean notify) {
+    private void leaveAdminMode(Player player, boolean notify) {
         if (!admins.remove(player.getUniqueId())) return;
         cancelPreview(player.getUniqueId());
         removeAdminTools(player);
-        plugin.placePlayerIntoWaitingState(player);
+        if (plugin.isGameRunning()) {
+            plugin.placePlayerIntoWaitingState(player);
+            if (notify) {
+                player.sendMessage(Component.text("已离开管理员模式。本局中你将以旁观者等待下一局。", NamedTextColor.YELLOW));
+            }
+            return;
+        }
+
+        plugin.applyIdleStateForOrdinaryPlayer(player);
         if (notify) {
-            player.sendMessage(Component.text("已离开管理员模式。本局中你将以旁观者等待下一局。", NamedTextColor.YELLOW));
+            player.sendMessage(Component.text("已离开管理员模式。你现在是普通玩家。", NamedTextColor.YELLOW));
         }
     }
 
