@@ -1597,7 +1597,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private Component statusLine(GamePlayer state) {
         updateUiTrail(state);
         int hpStep = Math.max(1, settings.damagePerHit());
-        int hpText = state.hp <= 0 ? 0 : Math.max(1, Math.min(5, (int) Math.ceil(state.hp / (double) hpStep)));
+        int hpText = state.hp <= 0 ? 0 : Math.max(1, Math.min(5, state.hp / hpStep));
         int mpText = Math.max(0, state.mp / Math.max(1, settings.maxMp() / 100));
         TextColor uiColor = TextColor.color(0x4e5c24);
         return Component.text("", uiColor).font(PLAYER_UI_FONT)
