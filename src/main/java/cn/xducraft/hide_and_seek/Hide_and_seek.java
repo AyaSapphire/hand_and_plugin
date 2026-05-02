@@ -948,7 +948,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         state.disguised = true;
         if (state.display != null) state.display.setBlock(state.disguiseData);
         player.getWorld().spawnParticle(Particle.BLOCK, player.getLocation().add(0, 1, 0), 25, 0.4, 0.6, 0.4, state.disguiseData);
-        player.playSound(player.getLocation(), Sound.BLOCK_GRASS_PLACE, 1f, 1.2f);
+        player.getWorld().playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, SoundCategory.MASTER, 1f, 1f);
     }
 
     private boolean isBlockedDisguise(Material material) {
@@ -1044,7 +1044,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         state.flyLocked = true;
         state.flyLockTicks = 0;
         player.getWorld().spawnParticle(Particle.CLOUD, player.getLocation(), 18, 0.25, 0.15, 0.25, 0.02);
-        player.playSound(player.getLocation(), Sound.ENTITY_BREEZE_JUMP, 1f, 1f);
+        if (requiredRole == Role.HIDER) {
+            player.getWorld().playSound(player.getLocation(), Sound.ENTITY_PHANTOM_AMBIENT, SoundCategory.MASTER, 1f, 1f);
+        } else {
+            player.getWorld().playSound(player.getLocation(), Sound.ENTITY_CHICKEN_AMBIENT, SoundCategory.MASTER, 1f, 1f);
+        }
     }
 
     private void useAttackBullet(Player player, GamePlayer state) {
@@ -1073,18 +1077,19 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (state.role != Role.SEEKER) return;
         if (!consumeMp(player, state, settings.scanMp())) return;
         Location location = player.getLocation().clone();
+        location.setYaw(0f);
+        location.setPitch(0f);
         ItemDisplay display = player.getWorld().spawn(location, ItemDisplay.class, spawned -> {
             spawned.setItemStack(resourcePackItem(Material.WHITE_DYE, new NamespacedKey("animated_java", "scan_effect/scan_effect")));
             spawned.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
             spawned.setPersistent(false);
             spawned.setTeleportDuration(1);
             spawned.setViewRange(96f);
-            spawned.setTransformation(new Transformation(
-                    new Vector3f(-0.5f, 0f, -0.5f),
-                    new Quaternionf(),
-                    new Vector3f(1.0f, 1.0f, 1.0f),
-                    new Quaternionf()
-            ));
+            spawned.setInterpolationDuration(1);
+            spawned.setDisplayWidth(48f);
+            spawned.setDisplayHeight(48f);
+            spawned.setRotation(0f, 0f);
+            applyScanEffectTransform(spawned, 1.0f);
         });
         scanEffects.add(new ScanEffect(player.getUniqueId(), display, location));
         for (Player viewer : Bukkit.getOnlinePlayers()) {
@@ -1219,8 +1224,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             }
             scanEffect.age++;
             double progress = Math.min(1.0, scanEffect.age / (double) settings.scanResultDelayTicks());
+            float visualScale = (float) (1.0 + progress * 20.0);
+            applyScanEffectTransform(scanEffect.display, visualScale);
             double radius = Math.max(1.0, settings.scanRadius() * progress);
-            if (scanEffect.age % 2 == 0) renderScanRing(scanEffect.origin, radius);
             if (!scanEffect.caught) {
                 scanEffect.caught = playersWithRole(Role.HIDER).stream()
                         .anyMatch(hider -> hider.getWorld().equals(scanEffect.origin.getWorld())
@@ -1237,6 +1243,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 iterator.remove();
             }
         }
+    }
+
+    private void applyScanEffectTransform(ItemDisplay display, float scale) {
+        display.setTransformation(new Transformation(
+                new Vector3f(0f, 0f, 0f),
+                new Quaternionf(),
+                new Vector3f(-scale, scale, -scale),
+                new Quaternionf()
+        ));
     }
 
     private void renderScanRing(Location origin, double radius) {
@@ -1260,7 +1275,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if ((oldEnough && (((Entity) player).isOnGround() || safeMedium)) || fallbackExpired) {
             state.flyLocked = false;
             state.flyLockTicks = 0;
-            player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_HAT, 0.35f, 1.6f);
+            player.getWorld().playSound(player.getLocation(), Sound.BLOCK_WOOL_PLACE, SoundCategory.MASTER, 1f, 1f);
+            if (state.role == Role.HIDER) {
+                player.getWorld().playSound(player.getLocation(), Sound.ENTITY_PHANTOM_DEATH, SoundCategory.MASTER, 1f, 1f);
+            } else {
+                player.getWorld().playSound(player.getLocation(), Sound.ENTITY_CHICKEN_DEATH, SoundCategory.MASTER, 1f, 1f);
+            }
         }
     }
 
@@ -1374,7 +1394,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void fail(Player player, String message) {
         player.sendMessage(Component.text(message, NamedTextColor.RED));
-        player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1f, 0.7f);
+        player.playSound(player.getLocation(), "minecraft:error", SoundCategory.MASTER, 1f, 1f);
     }
 
     @EventHandler
