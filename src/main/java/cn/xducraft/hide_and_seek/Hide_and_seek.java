@@ -2317,10 +2317,10 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 player,
                 rectangle,
                 dust,
-                3.0,
+                6.0,
                 world.getMinHeight() + 0.5,
                 world.getMaxHeight() - 0.5,
-                3.0,
+                8.0,
                 Math.max(settings.borderParticleViewDistance(), 256.0)
         );
     }

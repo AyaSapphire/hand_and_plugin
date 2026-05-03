@@ -408,12 +408,12 @@ final class AdminController implements Listener {
                 }
                 plugin.renderConfiguredBorderPreview(player);
                 repeats++;
-                if (repeats >= 50) {
+                if (repeats >= 40) {
                     cancelPreview(player.getUniqueId());
                     cancel();
                 }
             }
-        }.runTaskTimer(plugin, 0L, 4L);
+        }.runTaskTimer(plugin, 0L, 8L);
         previewTasks.put(player.getUniqueId(), task);
     }
 
