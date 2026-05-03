@@ -898,7 +898,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             if (player == null) continue;
             if (state.vanillaHazardCooldownTicks > 0) state.vanillaHazardCooldownTicks--;
             if (state.attackBulletCooldownTicks > 0) state.attackBulletCooldownTicks--;
-            if (state.tauntCooldownTicks > 0) state.tauntCooldownTicks--;
+            if (state.fireworkTauntCooldownTicks > 0) state.fireworkTauntCooldownTicks--;
+            if (state.lightningTauntCooldownTicks > 0) state.lightningTauntCooldownTicks--;
             applyGameState(player, false);
             state.hp = Math.min(settings.maxHp(), state.hp + settings.hpRegenPerTick());
             state.mp = Math.min(settings.maxMp(), state.mp + settings.mpRegenPerTick());
@@ -1201,7 +1202,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         inv.setItem(3, abilityItem("decoy", "诱饵", List.of("原地召唤一个伪装诱饵", "潜行使用会放置静止诱饵")));
         inv.setItem(4, abilityItem("fly_hider", "躲藏者跳跃", List.of("解除伪装并向视线方向位移")));
         inv.setItem(5, abilityItem(Material.FIREWORK_ROCKET, "taunt_firework", "烟花嘲讽", List.of("发射升空爆炸的烟花", "减少剩余时间")));
-        inv.setItem(6, abilityItem(Material.GOAT_HORN, "taunt_lightning", "雷击嘲讽", List.of("释放更强烈的雷击信号", "大幅减少剩余时间")));
+        inv.setItem(6, abilityItem(Material.LIGHTNING_ROD, "taunt_lightning", "雷击嘲讽", List.of("释放更强烈的雷击信号", "减少剩余时间")));
     }
 
     private void giveSeekerLoadout(Player player) {
@@ -1219,7 +1220,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             ensureAbility(player, 3, "decoy", "诱饵", List.of("原地召唤一个伪装诱饵", "潜行使用会放置静止诱饵"));
             ensureAbility(player, 4, "fly_hider", "躲藏者跳跃", List.of("解除伪装并向视线方向位移"));
             ensureAbility(player, 5, Material.FIREWORK_ROCKET, "taunt_firework", "烟花嘲讽", List.of("发射升空爆炸的烟花", "减少剩余时间"));
-            ensureAbility(player, 6, Material.GOAT_HORN, "taunt_lightning", "雷击嘲讽", List.of("释放更强烈的雷击信号", "大幅减少剩余时间"));
+            ensureAbility(player, 6, Material.LIGHTNING_ROD, "taunt_lightning", "雷击嘲讽", List.of("释放更强烈的雷击信号", "减少剩余时间"));
         } else {
             clearAbilitySlots(player, 3, 8);
             ensureAbility(player, 0, "attack_bullet", "攻击弹", List.of("命中躲藏者造成伤害"));
@@ -1467,16 +1468,17 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void useTaunt(Player player, GamePlayer state, TauntType type) {
         if (state.role != Role.HIDER) return;
         if (!isSeekerReleased()) {
-            player.sendActionBar(Component.text("寻找者释放后才能嘲讽。", NamedTextColor.RED));
+            player.sendMessage(Component.text("寻找者释放后才能使用嘲讽。", NamedTextColor.RED));
             return;
         }
-        if (state.tauntCooldownTicks > 0) {
-            player.sendActionBar(Component.text("嘲讽冷却中。", NamedTextColor.YELLOW));
+        int cooldownTicks = getTauntCooldownTicks(state, type);
+        if (cooldownTicks > 0) {
+            player.sendMessage(Component.text(tauntDisplayName(type) + "冷却中，还需 " + formatCooldownSeconds(cooldownTicks) + " 秒。", NamedTextColor.YELLOW));
             return;
         }
-        state.tauntCooldownTicks = type == TauntType.FIREWORK
+        setTauntCooldownTicks(state, type, type == TauntType.FIREWORK
                 ? settings.fireworkTauntCooldownTicks()
-                : settings.lightningTauntCooldownTicks();
+                : settings.lightningTauntCooldownTicks());
         int reductionTicks = type == TauntType.FIREWORK ? settings.fireworkTauntReductionTicks() : settings.lightningTauntReductionTicks();
         if (type == TauntType.FIREWORK) {
             triggerFireworkTaunt(player);
@@ -1942,6 +1944,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         state.role = Role.SEEKER;
         state.hp = settings.maxHp();
         state.mp = settings.maxMp();
+        clearAbilitySlots(player, 3, 8);
         player.teleport(getArenaSpawn());
         joinScoreboardTeam(player, Role.SEEKER);
         giveSeekerLoadout(player);
@@ -1961,6 +1964,26 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private boolean isSeekerReleased() {
         return phase == GamePhase.RUNNING && remainingTicks <= settings.seekerReleaseAt();
+    }
+
+    private int getTauntCooldownTicks(GamePlayer state, TauntType type) {
+        return type == TauntType.FIREWORK ? state.fireworkTauntCooldownTicks : state.lightningTauntCooldownTicks;
+    }
+
+    private void setTauntCooldownTicks(GamePlayer state, TauntType type, int ticks) {
+        if (type == TauntType.FIREWORK) {
+            state.fireworkTauntCooldownTicks = ticks;
+        } else {
+            state.lightningTauntCooldownTicks = ticks;
+        }
+    }
+
+    private String tauntDisplayName(TauntType type) {
+        return type == TauntType.FIREWORK ? "烟花嘲讽" : "雷击嘲讽";
+    }
+
+    private String formatCooldownSeconds(int ticks) {
+        return String.format(Locale.ROOT, "%.1f", ticks / 20.0);
     }
 
     private void triggerFireworkTaunt(Player player) {
@@ -3333,7 +3356,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private boolean flyLocked;
         private int flyLockTicks;
         private int attackBulletCooldownTicks;
-        private int tauntCooldownTicks;
+        private int fireworkTauntCooldownTicks;
+        private int lightningTauntCooldownTicks;
         private int borderDamageTicks;
         private int airDamageTicks;
         private int vanillaHazardCooldownTicks;

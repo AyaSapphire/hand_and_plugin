@@ -79,7 +79,7 @@ abilities:
     speed: 1.42
     hitRadius: 1.75
     maxFlightTicks: 80
-    cooldownTicks: 6
+    cooldownTicks: 5
     gravityPerTick: 0.028
     forwardOffset: 0.85
     verticalOffset: 0.0
@@ -89,9 +89,9 @@ abilities:
     resultDelayTicks: 20
   taunt:
     fireworkCooldownTicks: 1200
-    lightningCooldownTicks: 1400
-    fireworkTimeReductionTicks: 160
-    lightningTimeReductionTicks: 300
+    lightningCooldownTicks: 1200
+    fireworkTimeReductionTicks: 300
+    lightningTimeReductionTicks: 160
 
 worldBorder:
   initialSize: 128.0
