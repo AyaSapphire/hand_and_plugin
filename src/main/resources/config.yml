@@ -79,13 +79,13 @@ abilities:
     speed: 1.42
     hitRadius: 1.75
     maxFlightTicks: 80
-    cooldownTicks: 4
+    cooldownTicks: 2
     gravityPerTick: 0.028
     forwardOffset: 0.85
     verticalOffset: 0.0
   scan:
     mp: 1300
-    radius: 10.0
+    radius: 15.0
     resultDelayTicks: 20
   taunt:
     fireworkCooldownTicks: 1200
