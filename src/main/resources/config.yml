@@ -79,7 +79,7 @@ abilities:
     speed: 1.42
     hitRadius: 1.75
     maxFlightTicks: 80
-    cooldownTicks: 5
+    cooldownTicks: 4
     gravityPerTick: 0.028
     forwardOffset: 0.85
     verticalOffset: 0.0

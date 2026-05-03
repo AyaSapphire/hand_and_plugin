@@ -2005,6 +2005,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             spawned.setShotAtAngle(false);
         });
         firework.setVelocity(new Vector(0, 1.05, 0));
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (!firework.isDead() && firework.isValid()) {
+                firework.detonate();
+            }
+        }, 10L);
         world.playSound(location, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, SoundCategory.MASTER, 1f, 1.0f);
         world.playSound(location, Sound.EVENT_RAID_HORN, SoundCategory.MASTER, 0.6f, 1.55f);
     }
@@ -2048,7 +2053,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     @EventHandler
     public void onInventoryClick(InventoryClickEvent event) {
-        if (hasNoDrop(event.getCurrentItem()) || hasNoDrop(event.getCursor())) event.setCancelled(true);
+        if (hasNoDrop(event.getCurrentItem()) || hasNoDrop(event.getCursor()) || hasNoDrop(hotbarSwapItem(event))) {
+            event.setCancelled(true);
+        }
     }
 
     @EventHandler
@@ -2059,6 +2066,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     @EventHandler
     public void onSwapHandItems(PlayerSwapHandItemsEvent event) {
         if (hasNoDrop(event.getMainHandItem()) || hasNoDrop(event.getOffHandItem())) event.setCancelled(true);
+    }
+
+    private ItemStack hotbarSwapItem(InventoryClickEvent event) {
+        if (event.getHotbarButton() < 0 || !(event.getWhoClicked() instanceof Player player)) {
+            return null;
+        }
+        return player.getInventory().getItem(event.getHotbarButton());
     }
 
     @EventHandler
