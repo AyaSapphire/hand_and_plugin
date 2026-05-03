@@ -2240,10 +2240,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             Player player = Bukkit.getPlayer(state.uuid);
             if (player == null || !player.getWorld().equals(getArenaSpawn().getWorld())) continue;
             Location loc = player.getLocation();
-            if (state.role == Role.SEEKER) {
-                state.borderDamageTicks = 0;
-                continue;
-            }
             if (rectangle.contains(loc.getX(), loc.getZ())) {
                 state.borderDamageTicks = 0;
                 continue;
@@ -2252,7 +2248,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             state.borderDamageTicks++;
             if (state.borderDamageTicks >= settings.borderOutsideDamageIntervalTicks()) {
                 state.borderDamageTicks = 0;
-                damageOutsideBorder(player, state);
+                if (state.role == Role.SEEKER) {
+                    warnSeekerOutsideBorder(player);
+                } else {
+                    damageOutsideBorder(player, state);
+                }
             }
         }
     }
@@ -2266,6 +2266,13 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             return;
         }
         damagePlayer(player, state, settings.borderOutsideDamage());
+    }
+
+    private void warnSeekerOutsideBorder(Player player) {
+        player.sendHurtAnimation(0f);
+        player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_HURT, 0.45f, 0.8f);
+        player.spawnParticle(Particle.DAMAGE_INDICATOR, player.getLocation().add(0, 1, 0), 4, 0.2, 0.35, 0.2, 0.02);
+        player.sendActionBar(Component.text("你已离开安全区，返回红色粒子内。", NamedTextColor.RED));
     }
 
     private void renderBorderParticles(BorderRectangle current) {
