@@ -1210,9 +1210,19 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             ensureAbility(player, 3, "decoy", "诱饵", List.of("原地召唤一个伪装诱饵", "潜行使用会放置静止诱饵"));
             ensureAbility(player, 4, "fly_hider", "躲藏者跳跃", List.of("解除伪装并向视线方向位移"));
         } else {
+            clearAbilitySlots(player, 3, 8);
             ensureAbility(player, 0, "attack_bullet", "攻击弹", List.of("命中躲藏者造成伤害"));
             ensureAbility(player, 1, "scan", "扫描", List.of("提示附近是否存在躲藏者"));
             ensureAbility(player, 2, "fly_seeker", "寻找者跳跃", List.of("向视线方向位移"));
+        }
+    }
+
+    private void clearAbilitySlots(Player player, int fromSlot, int toSlot) {
+        PlayerInventory inventory = player.getInventory();
+        for (int slot = fromSlot; slot <= toSlot; slot++) {
+            if (getAbility(inventory.getItem(slot)) != null) {
+                inventory.setItem(slot, null);
+            }
         }
     }
 
@@ -1550,8 +1560,14 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (state.hp <= 0) eliminateHider(player, state);
     }
 
+    private void playSeekerHitFeedback(Player player) {
+        player.playSound(player.getLocation(), Sound.ENTITY_BLAZE_HURT, 0.8f, 1.15f);
+        player.spawnParticle(Particle.DAMAGE_INDICATOR, player.getLocation().add(0, 1, 0), 6, 0.2, 0.35, 0.2, 0.02);
+    }
+
     private boolean damageNearbyHiders(Location location, UUID owner) {
         boolean hit = false;
+        Player attacker = Bukkit.getPlayer(owner);
         double hitRadius = settings.attackBulletHitRadius();
         for (Player player : playersWithRole(Role.HIDER)) {
             if (player.getUniqueId().equals(owner) || !player.getWorld().equals(location.getWorld())) continue;
@@ -1559,6 +1575,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 GamePlayer target = players.get(player.getUniqueId());
                 if (target != null) {
                     damageHider(player, target, settings.damagePerHit());
+                    if (attacker != null) {
+                        playSeekerHitFeedback(attacker);
+                    }
                     hit = true;
                     if (phase != GamePhase.RUNNING) return true;
                 }
@@ -1608,15 +1627,18 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             }
             bullet.age++;
             Location next = bullet.display.getLocation().add(bullet.velocity);
-            boolean hit = bullet.age >= settings.attackBulletMaxFlightTicks()
+            boolean hitEnvironment = bullet.age >= settings.attackBulletMaxFlightTicks()
                     || next.getBlock().getType().isSolid();
-            if (!hit) {
+            boolean hitTarget = false;
+            if (!hitEnvironment) {
                 bullet.display.teleport(next);
-                hit = damageNearbyHiders(next, bullet.owner) || damageNearbyDecoy(next, settings.damagePerHit());
+                hitTarget = damageNearbyHiders(next, bullet.owner) || damageNearbyDecoy(next, settings.damagePerHit());
                 if (phase != GamePhase.RUNNING) return;
             }
-            if (hit) {
+            if (hitTarget) {
                 bullet.display.getWorld().spawnParticle(Particle.CRIT, bullet.display.getLocation(), 16, 0.2, 0.2, 0.2, 0.05);
+            }
+            if (hitTarget || hitEnvironment) {
                 bullet.display.remove();
                 iterator.remove();
             }
