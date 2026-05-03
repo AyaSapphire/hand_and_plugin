@@ -7,6 +7,7 @@ import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
+import org.bukkit.FireworkEffect;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.GameRules;
@@ -32,6 +33,7 @@ import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.BlockDisplay;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.Firework;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
@@ -56,6 +58,7 @@ import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.inventory.meta.FireworkMeta;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
@@ -115,6 +118,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private NamespacedKey abilityKey;
     private NamespacedKey noDropKey;
     private NamespacedKey decoyProjectileKey;
+    private NamespacedKey tauntFireworkKey;
     private GameSettings settings;
     private BukkitTask gameTask;
     private BossBar bossBar;
@@ -135,6 +139,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         abilityKey = new NamespacedKey(this, "ability");
         noDropKey = new NamespacedKey(this, "no_drop");
         decoyProjectileKey = new NamespacedKey(this, "decoy_projectile");
+        tauntFireworkKey = new NamespacedKey(this, "taunt_firework");
         saveDefaultConfig();
         ensureConfigDefaults();
         settings = loadSettings();
@@ -892,6 +897,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             Player player = Bukkit.getPlayer(state.uuid);
             if (player == null) continue;
             if (state.vanillaHazardCooldownTicks > 0) state.vanillaHazardCooldownTicks--;
+            if (state.attackBulletCooldownTicks > 0) state.attackBulletCooldownTicks--;
+            if (state.tauntCooldownTicks > 0) state.tauntCooldownTicks--;
             applyGameState(player, false);
             state.hp = Math.min(settings.maxHp(), state.hp + settings.hpRegenPerTick());
             state.mp = Math.min(settings.maxMp(), state.mp + settings.mpRegenPerTick());
@@ -1193,6 +1200,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         inv.setItem(2, abilityItem("rotation_lock", "旋转锁定", List.of("右键切换伪装旋转锁定")));
         inv.setItem(3, abilityItem("decoy", "诱饵", List.of("原地召唤一个伪装诱饵", "潜行使用会放置静止诱饵")));
         inv.setItem(4, abilityItem("fly_hider", "躲藏者跳跃", List.of("解除伪装并向视线方向位移")));
+        inv.setItem(5, abilityItem(Material.FIREWORK_ROCKET, "taunt_firework", "烟花嘲讽", List.of("发射升空爆炸的烟花", "减少剩余时间")));
+        inv.setItem(6, abilityItem(Material.GOAT_HORN, "taunt_lightning", "雷击嘲讽", List.of("释放更强烈的雷击信号", "大幅减少剩余时间")));
     }
 
     private void giveSeekerLoadout(Player player) {
@@ -1209,6 +1218,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             ensureAbility(player, 2, "rotation_lock", "旋转锁定", List.of("右键切换伪装旋转锁定"));
             ensureAbility(player, 3, "decoy", "诱饵", List.of("原地召唤一个伪装诱饵", "潜行使用会放置静止诱饵"));
             ensureAbility(player, 4, "fly_hider", "躲藏者跳跃", List.of("解除伪装并向视线方向位移"));
+            ensureAbility(player, 5, Material.FIREWORK_ROCKET, "taunt_firework", "烟花嘲讽", List.of("发射升空爆炸的烟花", "减少剩余时间"));
+            ensureAbility(player, 6, Material.GOAT_HORN, "taunt_lightning", "雷击嘲讽", List.of("释放更强烈的雷击信号", "大幅减少剩余时间"));
         } else {
             clearAbilitySlots(player, 3, 8);
             ensureAbility(player, 0, "attack_bullet", "攻击弹", List.of("命中躲藏者造成伤害"));
@@ -1233,12 +1244,31 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
     }
 
+    private void ensureAbility(Player player, int slot, Material material, String ability, String name, List<String> lore) {
+        ItemStack current = player.getInventory().getItem(slot);
+        if (!ability.equals(getAbility(current)) || current == null || current.getType() != material) {
+            player.getInventory().setItem(slot, abilityItem(material, ability, name, lore));
+        }
+    }
+
     private ItemStack abilityItem(String ability, String name, List<String> lore) {
         ItemStack item = new ItemStack(Material.CARROT_ON_A_STICK);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(Component.text(name));
         meta.lore(lore.stream().map(Component::text).toList());
         meta.setItemModel(NamespacedKey.minecraft("ability/" + ability));
+        PersistentDataContainer pdc = meta.getPersistentDataContainer();
+        pdc.set(abilityKey, PersistentDataType.STRING, ability);
+        pdc.set(noDropKey, PersistentDataType.BYTE, (byte) 1);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack abilityItem(Material material, String ability, String name, List<String> lore) {
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text(name));
+        meta.lore(lore.stream().map(Component::text).toList());
         PersistentDataContainer pdc = meta.getPersistentDataContainer();
         pdc.set(abilityKey, PersistentDataType.STRING, ability);
         pdc.set(noDropKey, PersistentDataType.BYTE, (byte) 1);
@@ -1282,6 +1312,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             case "attack_bullet" -> useAttackBullet(player, state);
             case "scan" -> useScan(player, state);
             case "fly_seeker" -> useFly(player, state, Role.SEEKER, settings.seekerFlyMp(), settings.seekerFlyPower(), settings.seekerFlyMinYBoost());
+            case "taunt_firework" -> useTaunt(player, state, TauntType.FIREWORK);
+            case "taunt_lightning" -> useTaunt(player, state, TauntType.LIGHTNING);
             default -> {
             }
         }
@@ -1406,9 +1438,14 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private void useAttackBullet(Player player, GamePlayer state) {
         if (state.role != Role.SEEKER) return;
+        if (state.attackBulletCooldownTicks > 0) return;
         if (!consumeMp(player, state, settings.attackBulletMp())) return;
-        Location start = player.getEyeLocation().add(player.getEyeLocation().getDirection().normalize().multiply(0.8));
-        Vector velocity = player.getEyeLocation().getDirection().normalize().multiply(settings.attackBulletSpeed());
+        Location eye = player.getEyeLocation();
+        Vector direction = eye.getDirection().normalize();
+        Location start = eye.clone()
+                .add(direction.clone().multiply(settings.attackBulletForwardOffset()))
+                .add(0, settings.attackBulletVerticalOffset(), 0);
+        Vector velocity = direction.multiply(settings.attackBulletSpeed());
         ItemDisplay visual = player.getWorld().spawn(start, ItemDisplay.class, display -> {
             display.setItemStack(new ItemStack(Material.NETHERITE_BLOCK));
             display.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.GROUND);
@@ -1419,11 +1456,34 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                     new Vector3f(0f, -0.15f, 0f),
                     new Quaternionf(),
                     new Vector3f(0.45f, 0.45f, 0.45f),
-                    new Quaternionf()
+                new Quaternionf()
             ));
         });
         attackBullets.add(new AttackBullet(player.getUniqueId(), visual, velocity));
+        state.attackBulletCooldownTicks = settings.attackBulletCooldownTicks();
         player.playSound(player.getLocation(), Sound.ENTITY_SNOWBALL_THROW, 1f, 1.4f);
+    }
+
+    private void useTaunt(Player player, GamePlayer state, TauntType type) {
+        if (state.role != Role.HIDER) return;
+        if (!isSeekerReleased()) {
+            player.sendActionBar(Component.text("寻找者释放后才能嘲讽。", NamedTextColor.RED));
+            return;
+        }
+        if (state.tauntCooldownTicks > 0) {
+            player.sendActionBar(Component.text("嘲讽冷却中。", NamedTextColor.YELLOW));
+            return;
+        }
+        state.tauntCooldownTicks = type == TauntType.FIREWORK
+                ? settings.fireworkTauntCooldownTicks()
+                : settings.lightningTauntCooldownTicks();
+        int reductionTicks = type == TauntType.FIREWORK ? settings.fireworkTauntReductionTicks() : settings.lightningTauntReductionTicks();
+        if (type == TauntType.FIREWORK) {
+            triggerFireworkTaunt(player);
+        } else {
+            triggerLightningTaunt(player);
+        }
+        reduceRemainingTime(player, type, reductionTicks);
     }
 
     private void useScan(Player player, GamePlayer state) {
@@ -1460,6 +1520,15 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     @EventHandler
     public void onDamage(EntityDamageEvent event) {
+        if (event instanceof EntityDamageByEntityEvent byEntityEvent
+                && byEntityEvent.getDamager() instanceof Firework firework
+                && firework.getPersistentDataContainer().has(tauntFireworkKey, PersistentDataType.BYTE)) {
+            event.setCancelled(true);
+            return;
+        }
+        if (event instanceof EntityDamageByEntityEvent byEntityEvent && handleDecoyMeleeDamage(byEntityEvent)) {
+            return;
+        }
         if (!(event.getEntity() instanceof Player player)) return;
         GamePlayer state = players.get(player.getUniqueId());
         if (state == null) return;
@@ -1626,6 +1695,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 continue;
             }
             bullet.age++;
+            bullet.velocity.setY(bullet.velocity.getY() - settings.attackBulletGravityPerTick());
             Location next = bullet.display.getLocation().add(bullet.velocity);
             boolean hitEnvironment = bullet.age >= settings.attackBulletMaxFlightTicks()
                     || next.getBlock().getType().isSolid();
@@ -1821,6 +1891,39 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         loc.getWorld().spawnParticle(Particle.BLOCK, loc.clone().add(0, 0.5, 0), 18, 0.25, 0.25, 0.25, blockData);
     }
 
+    private boolean handleDecoyMeleeDamage(EntityDamageByEntityEvent event) {
+        if (!(event.getEntity() instanceof BlockDisplay display)) return false;
+        Decoy decoy = findDecoy(display);
+        if (decoy == null) return false;
+        event.setCancelled(true);
+        if (!(event.getDamager() instanceof Player attacker)) return true;
+        GamePlayer attackerState = players.get(attacker.getUniqueId());
+        if (attackerState == null || attackerState.role != Role.SEEKER || !isSeekerReleased()) return true;
+        removeDecoy(decoy);
+        attacker.playSound(attacker.getLocation(), Sound.BLOCK_STONE_BREAK, 0.9f, 1.1f);
+        attacker.spawnParticle(Particle.CRIT, display.getLocation().add(0, 0.5, 0), 12, 0.2, 0.2, 0.2, 0.03);
+        return true;
+    }
+
+    private Decoy findDecoy(BlockDisplay display) {
+        for (Decoy decoy : decoys) {
+            if (decoy.display != null && decoy.display.getUniqueId().equals(display.getUniqueId())) {
+                return decoy;
+            }
+        }
+        return null;
+    }
+
+    private void removeDecoy(Decoy decoy) {
+        if (decoy.display != null) {
+            World world = decoy.display.getWorld();
+            Location location = decoy.display.getLocation();
+            world.spawnParticle(Particle.BLOCK, location.clone().add(0, 0.5, 0), 18, 0.25, 0.25, 0.25, decoy.display.getBlock());
+            decoy.display.remove();
+        }
+        decoys.remove(decoy);
+    }
+
     private void eliminateHider(Player player, GamePlayer state) {
         releaseDisguise(player, state);
         if (state.display != null) {
@@ -1854,6 +1957,60 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         }
         state.mp -= amount;
         return true;
+    }
+
+    private boolean isSeekerReleased() {
+        return phase == GamePhase.RUNNING && remainingTicks <= settings.seekerReleaseAt();
+    }
+
+    private void triggerFireworkTaunt(Player player) {
+        Location location = player.getLocation().clone().add(0, 1.0, 0);
+        World world = player.getWorld();
+        Firework firework = world.spawn(location, Firework.class, spawned -> {
+            FireworkMeta meta = spawned.getFireworkMeta();
+            meta.clearEffects();
+            meta.addEffect(FireworkEffect.builder()
+                    .with(FireworkEffect.Type.BALL_LARGE)
+                    .withColor(Color.FUCHSIA, Color.ORANGE)
+                    .withFade(Color.YELLOW)
+                    .trail(true)
+                    .flicker(true)
+                    .build());
+            meta.setPower(2);
+            spawned.getPersistentDataContainer().set(tauntFireworkKey, PersistentDataType.BYTE, (byte) 1);
+            spawned.setFireworkMeta(meta);
+            spawned.setShotAtAngle(false);
+        });
+        firework.setVelocity(new Vector(0, 1.05, 0));
+        world.playSound(location, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, SoundCategory.MASTER, 1f, 1.0f);
+        world.playSound(location, Sound.EVENT_RAID_HORN, SoundCategory.MASTER, 0.6f, 1.55f);
+    }
+
+    private void triggerLightningTaunt(Player player) {
+        Location location = player.getLocation();
+        World world = player.getWorld();
+        world.strikeLightningEffect(location);
+        world.spawnParticle(Particle.ELECTRIC_SPARK, location.clone().add(0, 1.0, 0), 40, 0.4, 0.9, 0.4, 0.08);
+        world.playSound(location, Sound.ENTITY_LIGHTNING_BOLT_THUNDER, SoundCategory.MASTER, 0.8f, 1.2f);
+        world.playSound(location, Sound.EVENT_RAID_HORN, SoundCategory.MASTER, 0.8f, 0.7f);
+    }
+
+    private void reduceRemainingTime(Player player, TauntType type, int reductionTicks) {
+        remainingTicks = Math.max(0, remainingTicks - reductionTicks);
+        int reductionSeconds = reductionTicks / 20;
+        Component name = Component.text(player.getName(), NamedTextColor.AQUA);
+        Component message = type == TauntType.FIREWORK
+                ? Component.text("[嘲讽] ", NamedTextColor.LIGHT_PURPLE)
+                .append(name)
+                .append(Component.text(" 施放了烟花嘲讽，剩余时间 -", NamedTextColor.LIGHT_PURPLE))
+                .append(Component.text(reductionSeconds + " 秒", NamedTextColor.GOLD))
+                : Component.text("[嘲讽] ", NamedTextColor.RED)
+                .append(name)
+                .append(Component.text(" 施放了雷击嘲讽，剩余时间 -", NamedTextColor.RED))
+                .append(Component.text(reductionSeconds + " 秒", NamedTextColor.GOLD));
+        Bukkit.broadcast(message);
+        updateBossBar();
+        checkWin();
     }
 
     private void fail(Player player, String message) {
@@ -2626,9 +2783,17 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 positiveDouble("abilities.attackBullet.speed"),
                 positiveDouble("abilities.attackBullet.hitRadius"),
                 positiveInt("abilities.attackBullet.maxFlightTicks"),
+                nonNegativeInt("abilities.attackBullet.cooldownTicks"),
+                nonNegativeDouble("abilities.attackBullet.gravityPerTick"),
+                nonNegativeDouble("abilities.attackBullet.forwardOffset"),
+                getConfig().getDouble("abilities.attackBullet.verticalOffset"),
                 nonNegativeInt("abilities.scan.mp"),
                 positiveDouble("abilities.scan.radius"),
                 nonNegativeLong("abilities.scan.resultDelayTicks"),
+                positiveIntWithFallback("abilities.taunt.fireworkCooldownTicks", "abilities.taunt.globalCooldownTicks"),
+                positiveIntWithFallback("abilities.taunt.lightningCooldownTicks", "abilities.taunt.globalCooldownTicks"),
+                positiveInt("abilities.taunt.fireworkTimeReductionTicks"),
+                positiveInt("abilities.taunt.lightningTimeReductionTicks"),
                 borderInitialWidth,
                 borderInitialDepth,
                 positiveDouble("worldBorder.resetSize"),
@@ -3012,6 +3177,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return Math.max(0, getConfig().getInt(path));
     }
 
+    private int positiveIntWithFallback(String path, String fallbackPath) {
+        if (getConfig().contains(path)) return positiveInt(path);
+        if (getConfig().contains(fallbackPath)) return positiveInt(fallbackPath);
+        return 1;
+    }
+
     private int clampedInt(String path, int min, int max) {
         return Math.max(min, Math.min(max, getConfig().getInt(path)));
     }
@@ -3076,9 +3247,17 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             double attackBulletSpeed,
             double attackBulletHitRadius,
             int attackBulletMaxFlightTicks,
+            int attackBulletCooldownTicks,
+            double attackBulletGravityPerTick,
+            double attackBulletForwardOffset,
+            double attackBulletVerticalOffset,
             int scanMp,
             double scanRadius,
             long scanResultDelayTicks,
+            int fireworkTauntCooldownTicks,
+            int lightningTauntCooldownTicks,
+            int fireworkTauntReductionTicks,
+            int lightningTauntReductionTicks,
             double borderInitialWidth,
             double borderInitialDepth,
             double borderResetSize,
@@ -3131,6 +3310,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         SEEKER
     }
 
+    private enum TauntType {
+        FIREWORK,
+        LIGHTNING
+    }
+
     private static final class GamePlayer {
         private final UUID uuid;
         private Role role;
@@ -3148,6 +3332,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         private BlockDisplay display;
         private boolean flyLocked;
         private int flyLockTicks;
+        private int attackBulletCooldownTicks;
+        private int tauntCooldownTicks;
         private int borderDamageTicks;
         private int airDamageTicks;
         private int vanillaHazardCooldownTicks;

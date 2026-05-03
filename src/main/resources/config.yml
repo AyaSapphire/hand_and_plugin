@@ -68,21 +68,30 @@ abilities:
     unlockFallbackTicks: 100
   flyHider:
     mp: 1600
-    power: 1.85
-    minYBoost: 0.45
+    power: 2.15
+    minYBoost: 0.5
   flySeeker:
     mp: 300
-    power: 1.55
-    minYBoost: 0.45
+    power: 1.8
+    minYBoost: 0.5
   attackBullet:
     mp: 60
-    speed: 1.35
+    speed: 1.42
     hitRadius: 1.75
     maxFlightTicks: 80
+    cooldownTicks: 6
+    gravityPerTick: 0.028
+    forwardOffset: 0.85
+    verticalOffset: 0.0
   scan:
     mp: 1300
     radius: 10.0
     resultDelayTicks: 20
+  taunt:
+    fireworkCooldownTicks: 1200
+    lightningCooldownTicks: 1400
+    fireworkTimeReductionTicks: 160
+    lightningTimeReductionTicks: 300
 
 worldBorder:
   initialSize: 128.0
