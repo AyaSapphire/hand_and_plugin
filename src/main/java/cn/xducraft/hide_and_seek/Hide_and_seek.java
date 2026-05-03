@@ -766,7 +766,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private boolean isValidBlockListEntry(String entry) {
         if (entry.startsWith("#")) {
-            return resolveBlockTag(entry.substring(1)) != null;
+            return resolveDisguiseBlacklistTag(entry.substring(1)) != null;
         }
         Material material = Material.matchMaterial(entry);
         return material != null && material.isBlock();
@@ -2880,18 +2880,17 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 Material.BARRIER,
                 Material.STRUCTURE_VOID
         ));
+        blacklist.addAll(defaultForcedDisguiseBlacklist());
 
         for (String rawEntry : getConfig().getStringList("abilities.disguise.blacklist")) {
             String entry = normalizeBlockListEntry(rawEntry);
             if (entry.startsWith("#")) {
-                Tag<Material> tag = resolveBlockTag(entry.substring(1));
-                if (tag == null) {
+                Set<Material> materials = resolveDisguiseBlacklistTag(entry.substring(1));
+                if (materials == null) {
                     getLogger().warning("Unknown disguise blacklist block tag: " + entry);
                     continue;
                 }
-                tag.getValues().stream()
-                        .filter(Material::isBlock)
-                        .forEach(blacklist::add);
+                blacklist.addAll(materials);
                 continue;
             }
 
@@ -2905,10 +2904,82 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         return Set.copyOf(blacklist);
     }
 
+    private Set<Material> resolveDisguiseBlacklistTag(String key) {
+        Tag<Material> tag = resolveBlockTag(key);
+        if (tag != null) {
+            return tag.getValues().stream()
+                    .filter(Material::isBlock)
+                    .collect(HashSet::new, HashSet::add, HashSet::addAll);
+        }
+        return legacyDisguiseBlacklistTag(key);
+    }
+
     private Tag<Material> resolveBlockTag(String key) {
         NamespacedKey namespacedKey = NamespacedKey.fromString(key);
         if (namespacedKey == null) return null;
         return Bukkit.getTag(Tag.REGISTRY_BLOCKS, namespacedKey, Material.class);
+    }
+
+    private Set<Material> legacyDisguiseBlacklistTag(String key) {
+        return switch (key) {
+            case "minecraft:heads" -> Set.of(
+                    Material.CREEPER_HEAD,
+                    Material.CREEPER_WALL_HEAD,
+                    Material.DRAGON_HEAD,
+                    Material.DRAGON_WALL_HEAD,
+                    Material.PIGLIN_HEAD,
+                    Material.PIGLIN_WALL_HEAD,
+                    Material.PLAYER_HEAD,
+                    Material.PLAYER_WALL_HEAD,
+                    Material.SKELETON_SKULL,
+                    Material.SKELETON_WALL_SKULL,
+                    Material.WITHER_SKELETON_SKULL,
+                    Material.WITHER_SKELETON_WALL_SKULL,
+                    Material.ZOMBIE_HEAD,
+                    Material.ZOMBIE_WALL_HEAD
+            );
+            case "minecraft:tall_flower", "minecraft:tall_flowers" -> Set.of(
+                    Material.LILAC,
+                    Material.PEONY,
+                    Material.ROSE_BUSH,
+                    Material.SUNFLOWER,
+                    Material.PITCHER_PLANT
+            );
+            default -> null;
+        };
+    }
+
+    private Set<Material> defaultForcedDisguiseBlacklist() {
+        Set<Material> forced = new HashSet<>();
+        forced.addAll(Tag.FLOWERS.getValues());
+        forced.addAll(Tag.SAPLINGS.getValues());
+        forced.addAll(Set.of(
+                Material.SHORT_GRASS,
+                Material.TALL_GRASS,
+                Material.FERN,
+                Material.LARGE_FERN,
+                Material.DEAD_BUSH,
+                Material.BUSH,
+                Material.FIREFLY_BUSH,
+                Material.SWEET_BERRY_BUSH,
+                Material.PINK_PETALS,
+                Material.LILY_PAD,
+                Material.SEAGRASS,
+                Material.TALL_SEAGRASS,
+                Material.KELP,
+                Material.KELP_PLANT,
+                Material.CAVE_VINES,
+                Material.CAVE_VINES_PLANT,
+                Material.TWISTING_VINES,
+                Material.TWISTING_VINES_PLANT,
+                Material.WEEPING_VINES,
+                Material.WEEPING_VINES_PLANT,
+                Material.PITCHER_CROP,
+                Material.TORCHFLOWER_CROP,
+                Material.BEETROOTS,
+                Material.VINE
+        ));
+        return forced;
     }
 
     private int positiveInt(String path) {
