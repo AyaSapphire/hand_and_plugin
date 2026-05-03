@@ -120,6 +120,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private BossBar bossBar;
     private GamePhase phase = GamePhase.IDLE;
     private AdminController adminController;
+    private MapGuardService mapGuardService;
     private String selectedPresetKey;
     private ArenaPreset currentMatchPreset;
     private BorderState borderState;
@@ -140,6 +141,8 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         Bukkit.getPluginManager().registerEvents(this, this);
         adminController = new AdminController(this);
         Bukkit.getPluginManager().registerEvents(adminController, this);
+        mapGuardService = new MapGuardService(this);
+        Bukkit.getPluginManager().registerEvents(new MapGuardListener(mapGuardService), this);
         Objects.requireNonNull(getCommand("has"), "Command has is missing from plugin.yml").setExecutor(this);
         Objects.requireNonNull(getCommand("has"), "Command has is missing from plugin.yml").setTabCompleter(this);
         applyIdleStateToArenaPlayers();
@@ -193,6 +196,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             case "preset", "presets" -> handlePresetCommand(sender, args);
             case "settings", "config" -> handleSettingsCommand(sender, args);
             case "blacklist" -> handleBlacklistCommand(sender, args);
+            case "mapguard" -> handleMapGuardCommand(sender, args);
             case "help" -> sendHelp(sender);
             default -> sendHelp(sender);
         }
@@ -210,9 +214,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         if (args.length > 1 && (args[0].equalsIgnoreCase("preset") || args[0].equalsIgnoreCase("presets"))) {
             return tabCompletePresets(args);
         }
+        if (args.length > 1 && args[0].equalsIgnoreCase("mapguard")) {
+            return tabCompleteMapGuard(args);
+        }
         if (args.length != 1) return List.of();
         String prefix = args[0].toLowerCase(Locale.ROOT);
-        return List.of("help", "start", "stop", "setspawn", "status", "menu", "admin", "reload", "preset", "settings", "blacklist").stream()
+        return List.of("help", "start", "stop", "setspawn", "status", "menu", "admin", "reload", "preset", "settings", "blacklist", "mapguard").stream()
                 .filter(option -> option.startsWith(prefix))
                 .toList();
     }
@@ -227,6 +234,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         sender.sendMessage("/has preset list|select|create|delete|info - 管理数字地图预设");
         sender.sendMessage("/has settings list|get|set|reset - 查看和调整玩法设置");
         sender.sendMessage("/has blacklist list|add|remove - 查看和调整伪装黑名单");
+        sender.sendMessage("/has mapguard <on|off|status> - 切换地图交互封锁");
     }
 
     private void sendStatus(CommandSender sender) {
@@ -242,7 +250,38 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         reloadConfig();
         ensureConfigDefaults();
         settings = loadSettings();
+        if (mapGuardService != null) mapGuardService.reloadFromConfig();
         sender.sendMessage("已重载躲猫猫配置。正在运行的游戏会从下一次相关逻辑开始使用新设置。");
+    }
+
+    private void handleMapGuardCommand(CommandSender sender, String[] args) {
+        if (mapGuardService == null) {
+            sender.sendMessage("MapGuard 尚未初始化。");
+            return;
+        }
+        if (args.length < 2 || args[1].equalsIgnoreCase("status")) {
+            sender.sendMessage("MapGuard 当前状态: " + (mapGuardService.isEnabled() ? "开启" : "关闭"));
+            return;
+        }
+        switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "on", "enable", "true" -> {
+                mapGuardService.setEnabled(true);
+                sender.sendMessage("MapGuard 已开启。");
+            }
+            case "off", "disable", "false" -> {
+                mapGuardService.setEnabled(false);
+                sender.sendMessage("MapGuard 已关闭。");
+            }
+            default -> sender.sendMessage("/has mapguard <on|off|status>");
+        }
+    }
+
+    private List<String> tabCompleteMapGuard(String[] args) {
+        if (args.length != 2) return List.of();
+        String prefix = args[1].toLowerCase(Locale.ROOT);
+        return List.of("on", "off", "status").stream()
+                .filter(option -> option.startsWith(prefix))
+                .toList();
     }
 
     private void ensureConfigDefaults() {
