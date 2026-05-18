@@ -1,3 +1,7 @@
+//TODO: 边界和缩圈效果优化
+//TODO: 黑名单机制优化，去除硬编码
+//TODO: 闲置时允许互殴
+//TODO: 击杀反馈，防止seeker不知道自己击杀了hider
 package cn.xducraft.hide_and_seek;
 
 import net.kyori.adventure.key.Key;
@@ -1471,6 +1475,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             player.sendMessage(Component.text("寻找者释放后才能使用嘲讽。", NamedTextColor.RED));
             return;
         }
+        int unlockTicks = remainingTauntUnlockTicks();
+        if (unlockTicks > 0) {
+            player.sendMessage(Component.text("嘲讽尚未开放，还需 " + formatCooldownSeconds(unlockTicks) + " 秒。", NamedTextColor.YELLOW));
+            return;
+        }
         int cooldownTicks = getTauntCooldownTicks(state, type);
         if (cooldownTicks > 0) {
             player.sendMessage(Component.text(tauntDisplayName(type) + "冷却中，还需 " + formatCooldownSeconds(cooldownTicks) + " 秒。", NamedTextColor.YELLOW));
@@ -1532,6 +1541,11 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             return;
         }
         if (!(event.getEntity() instanceof Player player)) return;
+        if (isInArenaWorld(player) && (event.getCause() == EntityDamageEvent.DamageCause.FALL
+                || event.getCause() == EntityDamageEvent.DamageCause.LIGHTNING)) {
+            event.setCancelled(true);
+            return;
+        }
         GamePlayer state = players.get(player.getUniqueId());
         if (state == null) return;
         if (event instanceof EntityDamageByEntityEvent byEntityEvent && isPreReleaseSeekerAttack(byEntityEvent)) {
@@ -1561,9 +1575,6 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private int customDamageFromVanilla(EntityDamageEvent event, GamePlayer state) {
-        if (state.role == Role.SEEKER && event.getCause() == EntityDamageEvent.DamageCause.FALL) {
-            return 0;
-        }
         int damage;
         if (isFixedHitDamage(event.getCause())) {
             damage = settings.damagePerHit();
@@ -1950,6 +1961,9 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         giveSeekerLoadout(player);
         showTitle(player, Component.text("你被发现了", NamedTextColor.RED), Component.text("现在加入寻找者", NamedTextColor.GRAY), 10, 60, 10);
         Bukkit.broadcast(Component.text(player.getName() + " 已转为寻找者。", NamedTextColor.RED));
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            online.playSound(online.getLocation(), Sound.BLOCK_BELL_RESONATE, SoundCategory.MASTER, 1.0f, 0.7f);
+        }
         checkWin();
     }
 
@@ -1964,6 +1978,12 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
 
     private boolean isSeekerReleased() {
         return phase == GamePhase.RUNNING && remainingTicks <= settings.seekerReleaseAt();
+    }
+
+    private int remainingTauntUnlockTicks() {
+        if (!isSeekerReleased()) return Integer.MAX_VALUE;
+        int unlockAt = settings.seekerReleaseAt() - settings.tauntUnlockDelayAfterReleaseTicks();
+        return Math.max(0, remainingTicks - Math.max(0, unlockAt));
     }
 
     private int getTauntCooldownTicks(GamePlayer state, TauntType type) {
@@ -1989,38 +2009,21 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     private void triggerFireworkTaunt(Player player) {
         Location location = player.getLocation().clone().add(0, 1.0, 0);
         World world = player.getWorld();
-        Firework firework = world.spawn(location, Firework.class, spawned -> {
-            FireworkMeta meta = spawned.getFireworkMeta();
-            meta.clearEffects();
-            meta.addEffect(FireworkEffect.builder()
-                    .with(FireworkEffect.Type.BALL_LARGE)
-                    .withColor(Color.FUCHSIA, Color.ORANGE)
-                    .withFade(Color.YELLOW)
-                    .trail(true)
-                    .flicker(true)
-                    .build());
-            meta.setPower(2);
-            spawned.getPersistentDataContainer().set(tauntFireworkKey, PersistentDataType.BYTE, (byte) 1);
-            spawned.setFireworkMeta(meta);
-            spawned.setShotAtAngle(false);
-        });
-        firework.setVelocity(new Vector(0, 1.05, 0));
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (!firework.isDead() && firework.isValid()) {
-                firework.detonate();
-            }
-        }, 10L);
+        spawnTauntFirework(world, location, new Vector(0.08, 1.15, 0.02), 14L);
+        Bukkit.getScheduler().runTaskLater(this, () ->
+                spawnTauntFirework(world, location, new Vector(-0.06, 1.1, -0.03), 18L), 4L);
         world.playSound(location, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, SoundCategory.MASTER, 1f, 1.0f);
-        world.playSound(location, Sound.EVENT_RAID_HORN, SoundCategory.MASTER, 0.6f, 1.55f);
+        world.playSound(location, Sound.ENTITY_FIREWORK_ROCKET_LARGE_BLAST, SoundCategory.MASTER, 0.85f, 1.1f);
+        world.playSound(location, Sound.EVENT_RAID_HORN, SoundCategory.MASTER, 0.8f, 1.45f);
     }
 
     private void triggerLightningTaunt(Player player) {
         Location location = player.getLocation();
         World world = player.getWorld();
-        world.strikeLightningEffect(location);
-        world.spawnParticle(Particle.ELECTRIC_SPARK, location.clone().add(0, 1.0, 0), 40, 0.4, 0.9, 0.4, 0.08);
-        world.playSound(location, Sound.ENTITY_LIGHTNING_BOLT_THUNDER, SoundCategory.MASTER, 0.8f, 1.2f);
-        world.playSound(location, Sound.EVENT_RAID_HORN, SoundCategory.MASTER, 0.8f, 0.7f);
+        playLightningTauntBurst(world, location, 0.95f, 1.1f);
+        Bukkit.getScheduler().runTaskLater(this, () -> playLightningTauntBurst(world, location, 0.8f, 1.0f), 10L);
+        Bukkit.getScheduler().runTaskLater(this, () -> playLightningTauntBurst(world, location, 0.65f, 0.92f), 20L);
+        world.playSound(location, Sound.EVENT_RAID_HORN, SoundCategory.MASTER, 1f, 0.68f);
     }
 
     private void reduceRemainingTime(Player player, TauntType type, int reductionTicks) {
@@ -2039,6 +2042,37 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
         Bukkit.broadcast(message);
         updateBossBar();
         checkWin();
+    }
+
+    private void spawnTauntFirework(World world, Location location, Vector velocity, long detonateDelayTicks) {
+        Firework firework = world.spawn(location, Firework.class, spawned -> {
+            FireworkMeta meta = spawned.getFireworkMeta();
+            meta.clearEffects();
+            meta.addEffect(FireworkEffect.builder()
+                    .with(FireworkEffect.Type.BALL_LARGE)
+                    .withColor(Color.FUCHSIA, Color.ORANGE)
+                    .withFade(Color.YELLOW)
+                    .trail(true)
+                    .flicker(true)
+                    .build());
+            meta.setPower(2);
+            spawned.getPersistentDataContainer().set(tauntFireworkKey, PersistentDataType.BYTE, (byte) 1);
+            spawned.setFireworkMeta(meta);
+            spawned.setShotAtAngle(false);
+        });
+        firework.setVelocity(velocity);
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (!firework.isDead() && firework.isValid()) {
+                firework.detonate();
+            }
+        }, detonateDelayTicks);
+    }
+
+    private void playLightningTauntBurst(World world, Location location, float volume, float pitch) {
+        world.strikeLightningEffect(location);
+        world.spawnParticle(Particle.ELECTRIC_SPARK, location.clone().add(0, 1.0, 0), 48, 0.45, 1.0, 0.45, 0.08);
+        world.spawnParticle(Particle.FLASH, location.clone().add(0, 1.0, 0), 2, 0.15, 0.4, 0.15, 0.0);
+        world.playSound(location, Sound.ENTITY_LIGHTNING_BOLT_THUNDER, SoundCategory.MASTER, volume, pitch);
     }
 
     private void fail(Player player, String message) {
@@ -2221,7 +2255,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
     }
 
     private void applyIdleState(Player player) {
-        player.setInvulnerable(true);
+        player.setInvulnerable(false);
         player.setFoodLevel(20);
         player.setSaturation(20f);
         player.addPotionEffect(new PotionEffect(PotionEffectType.SATURATION, 220, 0, false, false, false));
@@ -2827,6 +2861,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
                 nonNegativeInt("abilities.scan.mp"),
                 positiveDouble("abilities.scan.radius"),
                 nonNegativeLong("abilities.scan.resultDelayTicks"),
+                nonNegativeInt("abilities.taunt.unlockDelayAfterReleaseTicks"),
                 positiveIntWithFallback("abilities.taunt.fireworkCooldownTicks", "abilities.taunt.globalCooldownTicks"),
                 positiveIntWithFallback("abilities.taunt.lightningCooldownTicks", "abilities.taunt.globalCooldownTicks"),
                 positiveInt("abilities.taunt.fireworkTimeReductionTicks"),
@@ -3291,6 +3326,7 @@ public final class Hide_and_seek extends JavaPlugin implements Listener, Command
             int scanMp,
             double scanRadius,
             long scanResultDelayTicks,
+            int tauntUnlockDelayAfterReleaseTicks,
             int fireworkTauntCooldownTicks,
             int lightningTauntCooldownTicks,
             int fireworkTauntReductionTicks,

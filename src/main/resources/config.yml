@@ -88,6 +88,7 @@ abilities:
     radius: 15.0
     resultDelayTicks: 20
   taunt:
+    unlockDelayAfterReleaseTicks: 900
     fireworkCooldownTicks: 1200
     lightningCooldownTicks: 1200
     fireworkTimeReductionTicks: 300
