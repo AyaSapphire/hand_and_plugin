@@ -8,9 +8,8 @@ on:
         required: true
         type: string
       java_version:
-        description: Java version used for the release build
+        description: Java major version; if omitted, use gradle.properties
         required: false
-        default: '21'
         type: string
 
 permissions:
@@ -24,11 +23,31 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Resolve Java version
+        id: resolve_java_version
+        env:
+          REQUESTED_JAVA_VERSION: ${{ inputs.java_version }}
+        shell: bash
+        run: |
+          if [[ -n "$REQUESTED_JAVA_VERSION" ]]; then
+            java_version="$REQUESTED_JAVA_VERSION"
+          else
+            java_version="$(sed -n 's/^javaVersion[[:space:]]*=[[:space:]]*//p' gradle.properties | head -n 1 | tr -d '[:space:]')"
+          fi
+
+          if [[ ! "$java_version" =~ ^[0-9]+$ ]]; then
+            echo "::error::Java version must be a numeric major version."
+            exit 1
+          fi
+
+          echo "Using Java $java_version"
+          echo "version=$java_version" >> "$GITHUB_OUTPUT"
+
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ inputs.java_version }}
+          java-version: ${{ steps.resolve_java_version.outputs.version }}
           cache: gradle
 
       - name: Set up Gradle
@@ -36,7 +55,7 @@ jobs:
 
       - name: Build release artifact
         env:
-          JAVA_VERSION: ${{ inputs.java_version }}
+          JAVA_VERSION: ${{ steps.resolve_java_version.outputs.version }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: bash gradlew build "-PjavaVersion=${JAVA_VERSION}" "-Pversion=${RELEASE_VERSION}"
 
