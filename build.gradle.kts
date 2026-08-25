@@ -12,8 +12,10 @@ dependencies {
     compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
 }
 
+val javaVersion = providers.gradleProperty("javaVersion").orElse("21").get().toInt()
+
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(21)
+    toolchain.languageVersion = JavaLanguageVersion.of(javaVersion)
 }
 
 tasks {

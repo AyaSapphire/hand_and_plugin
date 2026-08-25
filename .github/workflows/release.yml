@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example, 1.0.0)
+        required: true
+        type: string
+      java_version:
+        description: Java version used for the release build
+        required: false
+        default: '21'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build release artifact
+        env:
+          JAVA_VERSION: ${{ inputs.java_version }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: bash gradlew build "-PjavaVersion=${JAVA_VERSION}" "-Pversion=${RELEASE_VERSION}"
+
+      - name: Create prerelease and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          gh release create "v${RELEASE_VERSION}" build/libs/*.jar
+          --target "${GITHUB_SHA}"
+          --title "v${RELEASE_VERSION}"
+          --prerelease
+          --generate-notes
